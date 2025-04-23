@@ -8,7 +8,7 @@ import time
 import pyvirtualcam
 from model import Generator
 import tkinter as tk
-from tkinter import ttk, Scale
+from tkinter import ttk, Scale, messagebox
 import threading
 from queue import Queue
 import gc
