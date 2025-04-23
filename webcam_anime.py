@@ -46,37 +46,37 @@ show_preview = True  # Mostra anteprima (disattivare per prestazioni migliori)
 
 
 # Funzione per individuare le sorgenti video disponibili
+# Funzione per individuare le sorgenti video disponibili
 def trova_sorgenti_video():
-    def trova_sorgenti_video():
-        sorgenti = {}
+    sorgenti = {}
 
-        # Prima prova le sorgenti standard (0, 1, 2)
-        for indice in range(3):  # Limita a 3 sorgenti massime
-            cap = cv2.VideoCapture(indice)
-            if cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    nome = f"Sorgente {indice}"
-                    if indice == 0:
-                        nome = "Webcam principale"
-                    sorgenti[nome] = indice
-                cap.release()
-
-        # Se su macOS e nessuna sorgente trovata, prova specificamente l'indice 0
-        if len(sorgenti) == 0 and platform.system() == "Darwin":
-            print("Tentativo di accesso specifico alla webcam principale...")
-            cap = cv2.VideoCapture(0)
-            if cap.isOpened():
-                sorgenti["Webcam macOS"] = 0
+    # Prima prova le sorgenti standard (0, 1, 2)
+    for indice in range(3):  # Limita a 3 sorgenti massime
+        cap = cv2.VideoCapture(indice)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                nome = f"Sorgente {indice}"
+                if indice == 0:
+                    nome = "Webcam principale"
+                sorgenti[nome] = indice
             cap.release()
 
-        # Se non ci sono ancora sorgenti, aggiungi un messaggio
-        if len(sorgenti) == 0:
-            print("Nessuna sorgente video trovata!")
-        else:
-            print(f"Trovate {len(sorgenti)} sorgenti video")
+    # Se su macOS e nessuna sorgente trovata, prova specificamente l'indice 0
+    if len(sorgenti) == 0 and platform.system() == "Darwin":
+        print("Tentativo di accesso specifico alla webcam principale...")
+        cap = cv2.VideoCapture(0)
+        if cap.isOpened():
+            sorgenti["Webcam macOS"] = 0
+        cap.release()
 
-        return sorgenti
+    # Se non ci sono ancora sorgenti, aggiungi un messaggio
+    if len(sorgenti) == 0:
+        print("Nessuna sorgente video trovata!")
+    else:
+        print(f"Trovate {len(sorgenti)} sorgenti video")
+
+    return sorgenti
 
 
 # Funzione per caricare il modello
@@ -294,8 +294,10 @@ def crea_interfaccia_grafica():
     ctk.set_default_color_theme("dark-blue")
 
     # Trova le sorgenti video disponibili
+    # Trova le sorgenti video disponibili
     sorgenti_disponibili = trova_sorgenti_video()
-
+    if sorgenti_disponibili is None:
+        sorgenti_disponibili = {}
     # Crea la finestra principale
     root = ctk.CTk()
     root.title("Code22 Ai Camera")
