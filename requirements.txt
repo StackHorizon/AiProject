@@ -1,0 +1,7 @@
+torch >= 1.7.1
+torchvision~=0.21.0
+numpy~=2.2.5
+pillow~=11.2.1
+opencv-python
+pyvirtualcam
+customtkinter
