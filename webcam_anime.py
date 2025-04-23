@@ -3,6 +3,7 @@ import torch
 from PIL import Image
 import numpy as np
 import os
+import platform
 import time
 import pyvirtualcam
 from model import Generator
@@ -20,7 +21,6 @@ elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
 else:
     device = "cpu"
 print(f"Utilizzando: {device}")
-
 
 # Lista dei modelli disponibili
 modelli_disponibili = [
@@ -47,21 +47,36 @@ show_preview = True  # Mostra anteprima (disattivare per prestazioni migliori)
 
 # Funzione per individuare le sorgenti video disponibili
 def trova_sorgenti_video():
-    sorgenti = {}
-    indice = 0
-    while True:
-        cap = cv2.VideoCapture(indice)
-        if not cap.isOpened():
-            break
-        ret, _ = cap.read()
-        if ret:
-            nome = f"Sorgente {indice}"
-            if indice == 0:
-                nome = "Webcam integrata"
-            sorgenti[nome] = indice
-        cap.release()
-        indice += 1
-    return sorgenti
+    def trova_sorgenti_video():
+        sorgenti = {}
+
+        # Prima prova le sorgenti standard (0, 1, 2)
+        for indice in range(3):  # Limita a 3 sorgenti massime
+            cap = cv2.VideoCapture(indice)
+            if cap.isOpened():
+                ret, _ = cap.read()
+                if ret:
+                    nome = f"Sorgente {indice}"
+                    if indice == 0:
+                        nome = "Webcam principale"
+                    sorgenti[nome] = indice
+                cap.release()
+
+        # Se su macOS e nessuna sorgente trovata, prova specificamente l'indice 0
+        if len(sorgenti) == 0 and platform.system() == "Darwin":
+            print("Tentativo di accesso specifico alla webcam principale...")
+            cap = cv2.VideoCapture(0)
+            if cap.isOpened():
+                sorgenti["Webcam macOS"] = 0
+            cap.release()
+
+        # Se non ci sono ancora sorgenti, aggiungi un messaggio
+        if len(sorgenti) == 0:
+            print("Nessuna sorgente video trovata!")
+        else:
+            print(f"Trovate {len(sorgenti)} sorgenti video")
+
+        return sorgenti
 
 
 # Funzione per caricare il modello
@@ -195,8 +210,9 @@ def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
     cap = cv2.VideoCapture(sorgente_id)
     if not cap.isOpened():
         print(f"Errore: Impossibile aprire la sorgente video {sorgente_id}")
+        messagebox.showerror("Errore",
+                             f"Impossibile aprire la sorgente video {sorgente_id}.\nAssicurati che la webcam sia collegata e non in uso da altre applicazioni.")
         return
-
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -260,7 +276,7 @@ def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
 
 # Funzione per cambiare modello durante l'esecuzione
 def cambia_modello(nome_modello):
-    global current_model_name
+    global current_model_name, model
     model = carica_modello(nome_modello)
     current_model_name = nome_modello
 
