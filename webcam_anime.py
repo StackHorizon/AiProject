@@ -264,20 +264,10 @@ def elaborazione_thread(width, height):
 def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
     global running, current_model_name, processed_frame, model, skip_frames, processing_resolution, show_preview
 
-    # Gestione speciale per OBS Virtual Camera su macOS
-    if sorgente_id == -1 and platform.system() == "Darwin":
-        messagebox.showinfo(
-            "OBS Virtual Camera su macOS",
-            "Per utilizzare OBS Virtual Camera su macOS:\n\n"
-            "1. Apri OBS Studio\n"
-            "2. Vai su Strumenti > Virtual Camera > Avvia\n"
-            "3. Riavvia questa applicazione e seleziona nuovamente la sorgente"
-        )
-        return
-
     # Inizializza il modello
     model = carica_modello(modello_iniziale)
     current_model_name = modello_iniziale
+
     # Ottieni la dimensione del video
     cap = cv2.VideoCapture(sorgente_id)
     if not cap.isOpened():
@@ -285,6 +275,7 @@ def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
         messagebox.showerror("Errore",
                              f"Impossibile aprire la sorgente video {sorgente_id}.\nAssicurati che la webcam sia collegata e non in uso da altre applicazioni.")
         return
+
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -308,37 +299,72 @@ def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
     while processed_frame is None and running:
         time.sleep(0.1)
 
-    # Crea la fotocamera virtuale
-    try:
-        with pyvirtualcam.Camera(width=width, height=height, fps=fps, fmt=pyvirtualcam.PixelFormat.BGR) as cam:
-            print(f"Fotocamera virtuale avviata: {cam.device}")
+    # Gestione specifica per macOS
+    if platform.system() == "Darwin":
+        # Su macOS, non creiamo una fotocamera virtuale ma mostriamo i frame elaborati
+        # che l'utente può catturare con OBS
+        messagebox.showinfo(
+            "Modalità macOS",
+            "Su macOS, il video elaborato verrà mostrato in una finestra.\n\n"
+            "Per usarlo come fotocamera virtuale:\n"
+            "1. Apri OBS Studio\n"
+            "2. Aggiungi una sorgente 'Cattura finestra'\n"
+            "3. Seleziona la finestra 'AnimeGAN Preview'\n"
+            "4. Avvia la Virtual Camera di OBS"
+        )
 
+        try:
             while running:
-                # Invia il frame elaborato alla fotocamera virtuale
+                # Mostra il frame elaborato
                 with process_frame_lock:
                     if processed_frame is not None:
                         current_frame = processed_frame.copy()
                     else:
-                        # Se non c'è un frame elaborato, usa un frame nero
                         current_frame = np.zeros((height, width, 3), dtype=np.uint8)
 
-                # Invia il frame alla fotocamera virtuale
-                cam.send(current_frame)
+                # Mostra sempre l'anteprima su macOS
+                cv2.imshow('AnimeGAN Preview', current_frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
 
-                # Visualizza anteprima se attivata
-                if show_preview:
-                    cv2.imshow('AnimeGAN Preview', current_frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
+                # Limita il framerate
+                time.sleep(1 / fps)
+        except Exception as e:
+            print(f"Errore durante l'esecuzione in modalità macOS: {e}")
+    else:
+        # Su Windows e altri sistemi, usa pyvirtualcam normalmente
+        try:
+            with pyvirtualcam.Camera(width=width, height=height, fps=fps, fmt=pyvirtualcam.PixelFormat.BGR) as cam:
+                print(f"Fotocamera virtuale avviata: {cam.device}")
 
-                # Sincronizza con la frequenza della fotocamera virtuale
-                cam.sleep_until_next_frame()
+                while running:
+                    with process_frame_lock:
+                        if processed_frame is not None:
+                            current_frame = processed_frame.copy()
+                        else:
+                            current_frame = np.zeros((height, width, 3), dtype=np.uint8)
 
-    except Exception as e:
-        print(f"Errore con la fotocamera virtuale: {e}")
+                    # Invia il frame alla fotocamera virtuale
+                    cam.send(current_frame)
+
+                    # Visualizza anteprima se attivata
+                    if show_preview:
+                        cv2.imshow('AnimeGAN Preview', current_frame)
+                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                            break
+
+                    # Sincronizza con la frequenza della fotocamera virtuale
+                    cam.sleep_until_next_frame()
+
+        except Exception as e:
+            print(f"Errore con la fotocamera virtuale: {e}")
+
+            if platform.system() == "Windows":
+                messagebox.showerror("Errore",
+                                     f"Problema con la fotocamera virtuale: {e}\n\nVerifica che OBS sia installato.")
 
     # Pulisci risorse
-    if show_preview:
+    if show_preview or platform.system() == "Darwin":
         cv2.destroyAllWindows()
 
     # Reset il frame elaborato
