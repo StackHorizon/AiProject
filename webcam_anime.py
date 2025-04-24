@@ -45,6 +45,48 @@ processing_resolution = 384  # Risoluzione di processing ridotta
 show_preview = True  # Mostra anteprima (disattivare per prestazioni migliori)
 
 
+def trova_schede_acquisizione():
+    capture_cards = {}
+
+    # Cerca dispositivi con indici più alti (tipici per schede di acquisizione)
+    for indice in range(8, 16):
+        try:
+            cap = cv2.VideoCapture(indice)
+            if cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    nome = f"Scheda acquisizione {indice} ({width}x{height})"
+                    capture_cards[nome] = indice
+                    print(f"Trovata scheda acquisizione {indice}")
+            cap.release()
+        except Exception as e:
+            pass
+
+    # Su macOS, prova anche con indici specifici per schede di acquisizione
+    if platform.system() == "Darwin":
+        try:
+            # Indici comunemente usati da schede di acquisizione su macOS
+            for indice in [0, 1, 2, 3]:
+                try:
+                    cap = cv2.VideoCapture(indice, cv2.CAP_AVFOUNDATION)
+                    if cap.isOpened():
+                        # Legge le proprietà per verificare se è una scheda di acquisizione
+                        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        if width >= 1280 or height >= 720:  # Probabilmente una scheda di acquisizione HD
+                            nome = f"Dispositivo {indice} ({width}x{height})"
+                            capture_cards[nome] = indice
+                    cap.release()
+                except:
+                    pass
+        except:
+            pass
+
+    return capture_cards
+
+
 # Funzione per individuare le sorgenti video disponibili
 def trova_sorgenti_video():
     sorgenti = {}
@@ -106,6 +148,10 @@ def trova_sorgenti_video():
         except:
             pass
 
+    # Aggiungi le schede di acquisizione
+    capture_cards = trova_schede_acquisizione()
+    sorgenti.update(capture_cards)
+
     # Metodo alternativo: elenca tutti i backend disponibili e prova con ciascuno
     if len(sorgenti) == 0:
         print("Tentativo con backend alternativi...")
@@ -127,30 +173,6 @@ def trova_sorgenti_video():
                     cap.release()
                 except:
                     pass
-
-    # Metodo di ultima risorsa: prova a usare lo specifico nome del dispositivo
-    if platform.system() == "Windows" and len(sorgenti) == 0:
-        try:
-            # Alcuni nomi comuni di webcam
-            camera_names = [
-                "Microsoft® LifeCam",
-                "Integrated Webcam",
-                "USB Video Device",
-                "Camera",
-                "HD Camera"
-            ]
-            for name in camera_names:
-                try:
-                    cap = cv2.VideoCapture(name, cv2.CAP_DSHOW)
-                    if cap.isOpened():
-                        ret, frame = cap.read()
-                        if ret:
-                            sorgenti[f"Webcam: {name}"] = name
-                    cap.release()
-                except:
-                    pass
-        except:
-            pass
 
     # Se ancora non funziona, aggiungi almeno una opzione di default
     if len(sorgenti) == 0:
@@ -311,9 +333,26 @@ def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
     while processed_frame is None and running:
         time.sleep(0.1)
 
-    # Mostra sempre una finestra di anteprima su tutti i sistemi operativi
+    # Gestisci la creazione della finestra in modo diverso su macOS
     preview_window = 'AnimeGAN Preview'
-    cv2.namedWindow(preview_window, cv2.WINDOW_NORMAL)
+    preview_enabled = True
+
+    if platform.system() != "Darwin":  # Non su macOS
+        try:
+            cv2.namedWindow(preview_window, cv2.WINDOW_NORMAL)
+        except Exception as e:
+            print(f"Impossibile creare finestra di anteprima: {e}")
+            preview_enabled = False
+    else:
+        # Su macOS, evitiamo l'errore che causa il crash
+        try:
+            # Tentativo più sicuro su macOS
+            cv2.namedWindow(preview_window, cv2.WINDOW_AUTOSIZE)
+            preview_enabled = True
+        except Exception as e:
+            print(f"Impossibile creare finestra su macOS: {e}")
+            preview_enabled = False
+            print("Su macOS: l'anteprima diretta è disabilitata per compatibilità")
 
     # Tenta di usare la fotocamera virtuale
     virtual_cam = None
@@ -367,10 +406,25 @@ def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
                 else:
                     current_frame = np.zeros((height, width, 3), dtype=np.uint8)
 
-            # Aggiorna sempre la finestra di anteprima
-            cv2.imshow(preview_window, current_frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            # Aggiorna la finestra di anteprima solo se è stata creata con successo
+            if show_preview and preview_enabled:
+                try:
+                    cv2.imshow(preview_window, current_frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                except Exception as e:
+                    print(f"Errore durante la visualizzazione dell'anteprima: {e}")
+                    preview_enabled = False
+
+            # Su macOS, se l'anteprima non è abilitata, salva periodicamente un'immagine
+            if show_preview and platform.system() == "Darwin" and not preview_enabled:
+                # Salva un frame ogni 30 frame per non sovraccaricare il filesystem
+                if int(time.time() * 10) % 30 == 0:
+                    try:
+                        frame_filename = os.path.join(os.path.expanduser("~"), "Desktop", "animegan_preview.png")
+                        cv2.imwrite(frame_filename, current_frame)
+                    except Exception as e:
+                        pass
 
             # Se disponibile, invia il frame alla fotocamera virtuale
             if cam_available and virtual_cam:
@@ -395,7 +449,12 @@ def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
             except:
                 pass
 
-        cv2.destroyAllWindows()
+        if preview_enabled:
+            try:
+                cv2.destroyAllWindows()
+            except:
+                pass
+
         with process_frame_lock:
             processed_frame = None
 
