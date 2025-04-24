@@ -5,23 +5,13 @@ import numpy as np
 import os
 import platform
 import time
+import pyvirtualcam
+from model import Generator
+import tkinter as tk
+from tkinter import ttk, Scale, messagebox
 import threading
 from queue import Queue
 import gc
-import customtkinter as ctk
-import tkinter as tk
-import sys
-
-# All'inizio del file, dopo gli import esistenti
-if platform.system() == "Darwin":  # macOS
-    try:
-        import pygame
-        import pygame.camera
-        from pygame.locals import DOUBLEBUF, QUIT
-
-        pygame.init()
-    except ImportError:
-        print("Pygame non trovato su macOS. Installa con: pip install pygame")
 
 # Controlla se è disponibile la GPU
 if torch.cuda.is_available():
@@ -32,38 +22,6 @@ else:
     device = "cpu"
 print(f"Utilizzando: {device}")
 
-# Importa in base al sistema operativo
-IS_MACOS = platform.system() == "Darwin"
-IS_WINDOWS = platform.system() == "Windows"
-
-if IS_MACOS:
-    try:
-        import pygame
-        import pygame.camera
-        from pygame.locals import *
-
-        pygame.init()
-
-        # Prova ad importare PySyphon per macOS
-        try:
-            from pysyphon import server
-
-            syphon_available = True
-        except ImportError:
-            syphon_available = False
-            print("PySyphon non trovato. Installa con: pip install PySyphon")
-    except ImportError:
-        print("Pygame non trovato. Installa con: pip install pygame")
-else:
-    # Su Windows, usa pyvirtualcam standard
-    try:
-        import pyvirtualcam
-
-        virtual_cam_available = True
-    except ImportError:
-        virtual_cam_available = False
-        print("pyvirtualcam non trovato. Installa con: pip install pyvirtualcam")
-
 # Lista dei modelli disponibili
 modelli_disponibili = [
     "face_paint_512_v1",
@@ -72,60 +30,47 @@ modelli_disponibili = [
     "paprika"
 ]
 
+# Lista delle possibili sorgenti video
+sorgenti_disponibili = {}
+
 # Variabili globali
 running = False
 model = None
 current_model_name = ""
-frame_queue = Queue(maxsize=2)
+frame_queue = Queue(maxsize=2)  # Buffer limitato per evitare memory leak
 processed_frame = None
 process_frame_lock = threading.Lock()
-skip_frames = 1
-processing_resolution = 384
-show_preview = True
-syphon_server = None
+skip_frames = 1  # Numero di frame da saltare (0 = processa tutti i frame)
+processing_resolution = 384  # Risoluzione di processing ridotta
+show_preview = True  # Mostra anteprima (disattivare per prestazioni migliori)
 
 
-# Funzione per individuare le sorgenti video
+# Funzione per individuare le sorgenti video disponibili
+# Funzione per individuare le sorgenti video disponibili
 def trova_sorgenti_video():
     sorgenti = {}
 
-    if IS_MACOS:
-        # Su macOS, usa AVFoundation attraverso OpenCV
-        for i in range(10):  # Controlla fino a 10 possibili dispositivi
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    # Ottieni il nome del dispositivo (quando possibile)
-                    name = f"Camera {i}"
-                    vendor_info = cap.getBackendName()
-                    if vendor_info and len(vendor_info) > 0:
-                        name = f"{vendor_info} {i}"
-                    sorgenti[name] = i
-                cap.release()
+    # Prima prova le sorgenti standard (0, 1, 2)
+    for indice in range(3):  # Limita a 3 sorgenti massime
+        cap = cv2.VideoCapture(indice)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                nome = f"Sorgente {indice}"
+                if indice == 0:
+                    nome = "Webcam principale"
+                sorgenti[nome] = indice
+            cap.release()
 
-        # Controlla anche i device specifici di AVFoundation (per schede di acquisizione)
-        avf_indexes = [900 + i for i in range(5)]  # Indici AVFoundation specifici
-        for i in avf_indexes:
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    sorgenti[f"Dispositivo AVF {i - 900}"] = i
-                cap.release()
-    else:
-        # Su Windows/Linux, usa l'approccio standard
-        for indice in range(10):  # Controlla fino a 10 dispositivi
-            cap = cv2.VideoCapture(indice)
-            if cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    nome = f"Sorgente {indice}"
-                    if indice == 0:
-                        nome = "Webcam principale"
-                    sorgenti[nome] = indice
-                cap.release()
+    # Se su macOS e nessuna sorgente trovata, prova specificamente l'indice 0
+    if len(sorgenti) == 0 and platform.system() == "Darwin":
+        print("Tentativo di accesso specifico alla webcam principale...")
+        cap = cv2.VideoCapture(0)
+        if cap.isOpened():
+            sorgenti["Webcam macOS"] = 0
+        cap.release()
 
+    # Se non ci sono ancora sorgenti, aggiungi un messaggio
     if len(sorgenti) == 0:
         print("Nessuna sorgente video trovata!")
     else:
@@ -146,6 +91,7 @@ def carica_modello(nome_modello):
     print(f"Caricamento del modello: {nome_modello}")
 
     try:
+        # Rimuovo il blocco per il modello hayao_ghibli
         model = torch.hub.load("bryandlee/animegan2-pytorch:main", "generator",
                                pretrained=nome_modello).to(device).eval()
         return model
@@ -154,12 +100,13 @@ def carica_modello(nome_modello):
         return carica_modello("face_paint_512_v2") if nome_modello != "face_paint_512_v2" else None
 
 
-# Ridimensiona l'output alla dimensione originale
+# Ridimensiona l'output alla dimensione originale preservando le proporzioni
 def resize_without_padding(image, target_width, target_height):
-    return cv2.resize(image, (target_width, target_height))
+    # Ridimensiona l'immagine per riempire completamente lo spazio target
+    # senza mantenere le proporzioni originali
+    return cv2.resize(image, (target_width, target_height))  # Thread che acquisisce i frame dalla webcam
 
 
-# Thread che acquisisce i frame dalla webcam
 def acquisizione_thread(sorgente_id):
     global running, frame_queue
 
@@ -167,6 +114,8 @@ def acquisizione_thread(sorgente_id):
     if not cap.isOpened():
         print(f"Errore: Impossibile aprire la sorgente video {sorgente_id}")
         return
+
+    frame_count = 0
 
     while running:
         ret, frame = cap.read()
@@ -179,6 +128,7 @@ def acquisizione_thread(sorgente_id):
         if not frame_queue.full():
             frame_queue.put(frame)
 
+        frame_count += 1
         # Limita la frequenza di acquisizione
         time.sleep(0.01)
 
@@ -202,7 +152,7 @@ def elaborazione_thread(width, height):
         # Preleva un frame dalla coda
         frame = frame_queue.get()
 
-        # Decidi se elaborare questo frame
+        # Decidi se elaborare questo frame in base al contatore
         current_time = time.time()
         should_process = (frame_count % (skip_frames + 1) == 0) or (current_time - last_process_time > 0.5)
 
@@ -223,7 +173,7 @@ def elaborazione_thread(width, height):
 
             try:
                 # Applica la trasformazione in stile anime
-                with torch.no_grad():
+                with torch.no_grad():  # Disabilita il calcolo del gradiente per risparmiare memoria
                     anime_pil = face2paint(model, img_pil, size=processing_resolution)
 
                 # Converti l'immagine risultante da PIL a formato OpenCV
@@ -231,6 +181,9 @@ def elaborazione_thread(width, height):
 
                 # Ridimensiona l'output alla dimensione originale
                 anime_frame = resize_without_padding(anime_frame, width, height)
+                # Aggiungi info sul modello
+                # cv2.putText(anime_frame, f"Modello: {current_model_name}", (10, 30),
+                #            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
                 # Aggiorna il frame elaborato con lock per thread safety
                 with process_frame_lock:
@@ -245,129 +198,124 @@ def elaborazione_thread(width, height):
         frame_queue.task_done()
 
 
-# Funzione che gestisce la fotocamera virtuale
+# Funzione principale che gestisce la fotocamera virtuale
 def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
-    global running, current_model_name, processed_frame, model, syphon_server
+    global running, current_model_name, processed_frame, model, skip_frames, processing_resolution, show_preview
+
+    model = carica_modello(modello_iniziale)
+    current_model_name = modello_iniziale
+
+    cap = cv2.VideoCapture(sorgente_id)
+    if not cap.isOpened():
+        print(f"Errore: Impossibile aprire la sorgente video {sorgente_id}")
+        messagebox.showerror("Errore",
+                             f"Impossibile aprire la sorgente video {sorgente_id}.\nAssicurati che la webcam sia collegata e non in uso da altre applicazioni.")
+        return
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 30
+    cap.release()
+
+    running = True
+    acq_thread = threading.Thread(target=acquisizione_thread, args=(sorgente_id,))
+    elab_thread = threading.Thread(target=elaborazione_thread, args=(width, height))
+    acq_thread.daemon = True
+    elab_thread.daemon = True
+    acq_thread.start()
+    elab_thread.start()
+
+    while processed_frame is None and running:
+        time.sleep(0.1)
+
+    # Mostra sempre una finestra di anteprima su tutti i sistemi operativi
+    preview_window = 'AnimeGAN Preview'
+    cv2.namedWindow(preview_window, cv2.WINDOW_NORMAL)
+
+    # Tenta di usare la fotocamera virtuale
+    virtual_cam = None
+    cam_available = False
 
     try:
-        model = carica_modello(modello_iniziale)
-        current_model_name = modello_iniziale
-
-        cap = cv2.VideoCapture(sorgente_id)
-        if not cap.isOpened():
-            print(f"Errore: Impossibile aprire la sorgente video {sorgente_id}")
-            return False
-
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0:
-            fps = 30
-        cap.release()
-
-        running = True
-        acq_thread = threading.Thread(target=acquisizione_thread, args=(sorgente_id,))
-        elab_thread = threading.Thread(target=elaborazione_thread, args=(width, height))
-        acq_thread.daemon = True
-        elab_thread.daemon = True
-        acq_thread.start()
-        elab_thread.start()
-
-        # Attendi che il primo frame sia elaborato
-        while processed_frame is None and running:
-            time.sleep(0.1)
-
-        if IS_MACOS:
-            # Su macOS, usa Syphon + finestra di anteprima Pygame
-            if syphon_available:
-                pygame.display.set_mode((width, height), DOUBLEBUF)
-                syphon_server = server.SyphonServer("AnimeGAN2", width, height)
-
-                print("Server Syphon avviato: 'AnimeGAN2'")
-                print("Per utilizzare la fotocamera virtuale:")
-                print("1. Apri OBS Studio")
-                print("2. Aggiungi una sorgente 'Syphon Client' e seleziona 'AnimeGAN2'")
-                print("3. Avvia OBS Virtual Camera")
-
-                # Inizializza lo schermo pygame
-                screen = pygame.display.set_mode((width, height))
-                pygame.display.set_caption('AnimeGAN Preview')
-
-                clock = pygame.time.Clock()
-
-                while running:
-                    for event in pygame.event.get():
-                        if event.type == QUIT:
-                            running = False
-
-                    with process_frame_lock:
-                        if processed_frame is not None:
-                            # Converti il frame OpenCV in una surface pygame
-                            frame_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-                            pygame_frame = pygame.image.frombuffer(frame_rgb.tobytes(),
-                                                                   (width, height),
-                                                                   'RGB')
-
-                            # Mostra l'anteprima se richiesto
-                            if show_preview:
-                                screen.blit(pygame_frame, (0, 0))
-                                pygame.display.flip()
-
-                            # Invia al server Syphon
-                            syphon_server.publish_frame(pygame_frame)
-
-                    clock.tick(fps)
-            else:
-                # Fallback a una semplice finestra di anteprima se Syphon non è disponibile
-                print("PySyphon non disponibile. Mostro solo l'anteprima.")
-                while running:
-                    with process_frame_lock:
-                        if processed_frame is not None:
-                            cv2.imshow('AnimeGAN Preview (Cattura questa finestra)', processed_frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        running = False
-                    time.sleep(1.0 / fps)
-
-        else:
-            # Su Windows/Linux usa pyvirtualcam
+        if platform.system() == "Darwin":  # macOS
+            # Primo tentativo con pyvirtualcam che potrebbe funzionare con plugin installati
             try:
-                with pyvirtualcam.Camera(width=width, height=height, fps=fps, fmt=pyvirtualcam.PixelFormat.BGR) as cam:
-                    print(f"Fotocamera virtuale avviata: {cam.device}")
-                    while running:
-                        with process_frame_lock:
-                            if processed_frame is not None:
-                                current_frame = processed_frame.copy()
-                            else:
-                                current_frame = np.zeros((height, width, 3), dtype=np.uint8)
+                virtual_cam = pyvirtualcam.Camera(width=width, height=height, fps=fps, fmt=pyvirtualcam.PixelFormat.BGR)
+                print(f"Fotocamera virtuale macOS avviata: {virtual_cam.device}")
+                cam_available = True
+            except Exception as e:
+                print(f"Fallback per macOS: {e}")
+                print("Su macOS: Usa la finestra di anteprima con OBS Studio o altri software di streaming")
+        else:  # Windows e altri sistemi
+            try:
+                # Prova diversi backend disponibili
+                backends = pyvirtualcam.get_available_backends() if hasattr(pyvirtualcam,
+                                                                            "get_available_backends") else []
 
-                        cam.send(current_frame)
-                        if show_preview:
-                            cv2.imshow('AnimeGAN Preview', current_frame)
-                            if cv2.waitKey(1) & 0xFF == ord('q'):
-                                break
-                        cam.sleep_until_next_frame()
+                if backends:
+                    for backend in backends:
+                        try:
+                            print(f"Tentativo con backend: {backend}")
+                            virtual_cam = pyvirtualcam.Camera(width=width, height=height, fps=fps,
+                                                              fmt=pyvirtualcam.PixelFormat.BGR, backend=backend)
+                            print(f"Fotocamera virtuale avviata: {virtual_cam.device} (backend: {backend})")
+                            cam_available = True
+                            break
+                        except Exception as be:
+                            print(f"Errore con backend {backend}: {be}")
+                else:
+                    # Tentativo standard
+                    virtual_cam = pyvirtualcam.Camera(width=width, height=height, fps=fps,
+                                                      fmt=pyvirtualcam.PixelFormat.BGR)
+                    print(f"Fotocamera virtuale avviata: {virtual_cam.device}")
+                    cam_available = True
             except Exception as e:
                 print(f"Errore con la fotocamera virtuale: {e}")
-                if show_preview:
-                    while running:
-                        with process_frame_lock:
-                            if processed_frame is not None:
-                                cv2.imshow('AnimeGAN Preview (Cattura questa finestra)', processed_frame)
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                            running = False
-                        time.sleep(1.0 / fps)
+                print("Usa la finestra di anteprima con software di streaming")
+    except Exception as e:
+        print(f"Errore nell'inizializzazione della fotocamera: {e}")
 
-        return True
+    # Loop principale
+    try:
+        while running:
+            with process_frame_lock:
+                if processed_frame is not None:
+                    current_frame = processed_frame.copy()
+                else:
+                    current_frame = np.zeros((height, width, 3), dtype=np.uint8)
+
+            # Aggiorna sempre la finestra di anteprima
+            cv2.imshow(preview_window, current_frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+            # Se disponibile, invia il frame alla fotocamera virtuale
+            if cam_available and virtual_cam:
+                try:
+                    virtual_cam.send(current_frame)
+                    virtual_cam.sleep_until_next_frame()
+                except Exception as e:
+                    print(f"Errore nell'invio del frame: {e}")
+                    cam_available = False
+            else:
+                # Gestisci il timing manualmente se la fotocamera virtuale non è disponibile
+                time.sleep(1.0 / fps)
 
     except Exception as e:
-        print(f"Errore nell'avvio della fotocamera virtuale: {e}")
-        return False
+        print(f"Errore nel loop principale: {e}")
 
     finally:
-        if show_preview:
-            cv2.destroyAllWindows()
-        if IS_MACOS and syphon_server:
-            syphon_server.stop()
+        # Pulizia
+        if cam_available and virtual_cam:
+            try:
+                virtual_cam.close()
+            except:
+                pass
+
+        cv2.destroyAllWindows()
+        with process_frame_lock:
+            processed_frame = None
 
 
 # Funzione per cambiare modello durante l'esecuzione
@@ -377,51 +325,71 @@ def cambia_modello(nome_modello):
     current_model_name = nome_modello
 
 
-# Interfaccia grafica principale
+# Interfaccia grafica per la selezione della sorgente e del modello
 def crea_interfaccia_grafica():
     global sorgenti_disponibili, running, skip_frames, processing_resolution, show_preview
+
+    # Importa CustomTkinter
+    import customtkinter as ctk
+    import tkinter as tk
 
     # Configura l'aspetto di CustomTkinter
     ctk.set_appearance_mode("Dark")
     ctk.set_default_color_theme("dark-blue")
 
     # Trova le sorgenti video disponibili
+    # Trova le sorgenti video disponibili
     sorgenti_disponibili = trova_sorgenti_video()
-    if not sorgenti_disponibili:
+    if sorgenti_disponibili is None:
         sorgenti_disponibili = {}
-
     # Crea la finestra principale
     root = ctk.CTk()
     root.title("Code22 Ai Camera")
-    root.geometry("600x720")
+    root.geometry("600x700")
     root.minsize(500, 600)
+
+    # Imposta un colore di sfondo nero OLED
     root.configure(fg_color="#000000")
 
     # Crea un frame scrollable
     container = ctk.CTkFrame(root, fg_color="#000000")
     container.pack(fill="both", expand=True)
 
+    # Crea un canvas per lo scrolling
     canvas = ctk.CTkCanvas(container, bg="#000000", highlightthickness=0)
     canvas.pack(side="left", fill="both", expand=True)
 
+    # Aggiungi scrollbar
     scrollbar = ctk.CTkScrollbar(container, orientation="vertical", command=canvas.yview)
     scrollbar.pack(side="right", fill="y")
     canvas.configure(yscrollcommand=scrollbar.set)
 
+    # Frame interno scrollabile
     scroll_frame = ctk.CTkFrame(canvas, fg_color="#000000")
     scroll_frame_id = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
 
+    # Funzione per adattare il canvas al contenuto
     def configure_scroll_region(event):
         canvas.configure(scrollregion=canvas.bbox("all"))
         canvas.itemconfig(scroll_frame_id, width=event.width)
 
     scroll_frame.bind("<Configure>", configure_scroll_region)
-    canvas.bind("<Configure>", lambda e: canvas.itemconfig(scroll_frame_id, width=e.width))
-    canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+
+    # Aggiorna la dimensione del canvas in base alla dimensione della finestra
+    def on_canvas_configure(event):
+        canvas.itemconfig(scroll_frame_id, width=event.width)
+
+    canvas.bind("<Configure>", on_canvas_configure)
+
+    # Abilita lo scrolling con rotellina del mouse
+    def _on_mousewheel(event):
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
     # Card per sorgente video
-    source_card = ctk.CTkFrame(scroll_frame, corner_radius=15, fg_color="#202020",
-                               border_width=1, border_color="#303030")
+    source_card = ctk.CTkFrame(scroll_frame, corner_radius=15, fg_color="#202020", border_width=1,
+                               border_color="#303030")
     source_card.pack(padx=20, pady=10, fill="x")
 
     source_title = ctk.CTkLabel(source_card, text="Sorgente Video",
@@ -443,17 +411,9 @@ def crea_interfaccia_grafica():
                                            hover_color="#0052cc")
         source_option.pack(anchor="w", padx=15, pady=8)
 
-    # Aggiungi pulsante di scansione sorgenti
-    scan_btn = ctk.CTkButton(source_card, text="Scansiona sorgenti video",
-                             height=30, corner_radius=8,
-                             font=ctk.CTkFont(size=12),
-                             fg_color="#333333",
-                             hover_color="#444444")
-    scan_btn.pack(padx=20, pady=(0, 15), fill="x")
-
     # Card per modelli
-    model_card = ctk.CTkFrame(scroll_frame, corner_radius=15, fg_color="#202020",
-                              border_width=1, border_color="#303030")
+    model_card = ctk.CTkFrame(scroll_frame, corner_radius=15, fg_color="#202020", border_width=1,
+                              border_color="#303030")
     model_card.pack(padx=20, pady=10, fill="x")
 
     model_title = ctk.CTkLabel(model_card, text="Modello AnimeGAN",
@@ -475,8 +435,8 @@ def crea_interfaccia_grafica():
         model_option.pack(anchor="w", padx=15, pady=8)
 
     # Card per impostazioni prestazioni
-    perf_card = ctk.CTkFrame(scroll_frame, corner_radius=15, fg_color="#202020",
-                             border_width=1, border_color="#303030")
+    perf_card = ctk.CTkFrame(scroll_frame, corner_radius=15, fg_color="#202020", border_width=1,
+                             border_color="#303030")
     perf_card.pack(padx=20, pady=10, fill="x")
 
     perf_title = ctk.CTkLabel(perf_card, text="Impostazioni Prestazioni",
@@ -500,10 +460,10 @@ def crea_interfaccia_grafica():
     frame_skip_slider.set(skip_frames)
     frame_skip_slider.pack(fill="x", padx=30, pady=(0, 10))
 
+    # Update skip value label when slider changes
     def update_skip_label(val):
-        global skip_frames
-        skip_frames = int(val)
-        skip_value.configure(text=str(skip_frames))
+        skip_value.configure(text=str(int(val)))
+        setattr(__main__, 'skip_frames', int(val))
 
     frame_skip_slider.configure(command=update_skip_label)
 
@@ -524,11 +484,11 @@ def crea_interfaccia_grafica():
     resolution_slider.set(processing_resolution)
     resolution_slider.pack(fill="x", padx=30, pady=(0, 10))
 
+    # Update resolution label when slider changes
     def update_res_label(val):
-        global processing_resolution
         val_rounded = round(val / 64) * 64
-        processing_resolution = int(val_rounded)
-        res_value.configure(text=str(processing_resolution))
+        res_value.configure(text=str(int(val_rounded)))
+        setattr(__main__, 'processing_resolution', int(val_rounded))
 
     resolution_slider.configure(command=update_res_label)
 
@@ -541,18 +501,13 @@ def crea_interfaccia_grafica():
                                    variable=preview_var,
                                    progress_color="#0066ff",
                                    button_color="#0066ff",
-                                   button_hover_color="#0052cc")
+                                   button_hover_color="#0052cc",
+                                   command=lambda: setattr(__main__, 'show_preview', preview_var.get()))
     preview_switch.pack(anchor="w", padx=10, pady=5)
 
-    def update_preview():
-        global show_preview
-        show_preview = preview_var.get()
-
-    preview_switch.configure(command=update_preview)
-
     # Card per cambio modello
-    switch_card = ctk.CTkFrame(scroll_frame, corner_radius=15, fg_color="#202020",
-                               border_width=1, border_color="#303030")
+    switch_card = ctk.CTkFrame(scroll_frame, corner_radius=15, fg_color="#202020", border_width=1,
+                               border_color="#303030")
     switch_card.pack(padx=20, pady=10, fill="x")
 
     switch_title = ctk.CTkLabel(switch_card, text="Cambio Modello in Tempo Reale",
@@ -573,41 +528,45 @@ def crea_interfaccia_grafica():
         btn.grid(row=i // 2, column=i % 2, padx=8, pady=8, sticky="ew")
         bottoni_cambio_modello.append(btn)
 
+    # Configura le colonne in modo che abbiano lo stesso peso
     buttons_grid.columnconfigure(0, weight=1)
     buttons_grid.columnconfigure(1, weight=1)
 
-    # Card per info sistema
-    info_card = ctk.CTkFrame(scroll_frame, corner_radius=15, fg_color="#202020",
-                             border_width=1, border_color="#303030")
-    info_card.pack(padx=20, pady=10, fill="x")
+    # Aggiungi spaziatura dopo le card
+    ctk.CTkFrame(scroll_frame, fg_color="#000000", height=20).pack(fill="x")
 
-    info_title = ctk.CTkLabel(info_card, text="Informazioni Sistema",
-                              font=ctk.CTkFont(size=18, weight="bold"))
-    info_title.pack(anchor="w", padx=20, pady=(15, 10))
+    # Footer collassabile
+    footer_visible = tk.BooleanVar(value=True)
 
-    os_name = platform.system()
-    gpu_info = "CUDA" if device == "cuda" else "MPS (Apple Silicon)" if device == "mps" else "CPU"
+    def toggle_footer():
+        if footer_visible.get():
+            footer_content.pack_forget()
+            toggle_btn.configure(text="▲")
+            footer_frame.configure(height=25)
+        else:
+            footer_content.pack(fill="x", expand=True)
+            toggle_btn.configure(text="▼")
+            footer_frame.configure(height=80)
+        footer_visible.set(not footer_visible.get())
 
-    info_text = (f"Sistema: {os_name}\n"
-                 f"Dispositivo: {gpu_info}\n")
-
-    if IS_MACOS:
-        info_text += "\nModalità macOS: Utilizzo Syphon + OBS\n"
-        if not syphon_available:
-            info_text += "ATTENZIONE: PySyphon non installato! Solo anteprima disponibile.\n"
-            info_text += "Per installare: pip install PySyphon\n"
-    elif not virtual_cam_available:
-        info_text += "\nATTENZIONE: pyvirtualcam non installato!\n"
-        info_text += "Per installare: pip install pyvirtualcam\n"
-
-    info_label = ctk.CTkLabel(info_card, text=info_text, justify="left")
-    info_label.pack(anchor="w", padx=20, pady=(5, 15))
-
-    # Pulsanti principali
-    footer_frame = ctk.CTkFrame(root, fg_color="transparent", height=80)
+    # Footer trasparente
+    footer_frame = ctk.CTkFrame(root, corner_radius=0, fg_color="transparent", height=80)
     footer_frame.pack(fill="x", side="bottom")
+    footer_frame.pack_propagate(False)
 
-    btn_frame = ctk.CTkFrame(footer_frame, fg_color="transparent")
+    # Toggle button per nascondere/mostrare
+    toggle_btn = ctk.CTkButton(footer_frame, text="▼", width=30, height=20,
+                               fg_color="#333333", hover_color="#444444",
+                               corner_radius=0)
+    toggle_btn.configure(command=toggle_footer)
+    toggle_btn.pack(anchor="center", pady=(0, 1))
+
+    # Contenuto del footer
+    footer_content = ctk.CTkFrame(footer_frame, fg_color="transparent")
+    footer_content.pack(fill="x", expand=True)
+
+    # Pulsanti principali con migliore contrasto
+    btn_frame = ctk.CTkFrame(footer_content, fg_color="transparent")
     btn_frame.pack(pady=(2, 5), padx=20, fill="x")
 
     avvia_btn = ctk.CTkButton(btn_frame, text="Avvia Fotocamera Virtuale",
@@ -626,101 +585,82 @@ def crea_interfaccia_grafica():
     stop_btn.pack(side="right", padx=5, expand=True, fill="x")
 
     # Testo "powered by code22" in basso
-    footer_label = ctk.CTkLabel(footer_frame, text="powered by code22",
+    footer_label = ctk.CTkLabel(footer_content, text="powered by code22",
                                 font=ctk.CTkFont(size=12, weight="bold"),
                                 text_color="#888888")
     footer_label.pack(side="bottom", pady=(0, 2))
 
-    def rescansiona_sorgenti():
-        global sorgenti_disponibili
-
-        # Rimuovi i vecchi radiobutton
-        for widget in source_inner_frame.winfo_children():
-            widget.destroy()
-
-        # Trova nuove sorgenti
-        sorgenti_disponibili = trova_sorgenti_video()
-
-        # Ricostruisci i radiobutton
-        if sorgenti_disponibili:
-            sorgente_var.set(list(sorgenti_disponibili.keys())[0])
-            for nome_sorgente in sorgenti_disponibili:
-                source_option = ctk.CTkRadioButton(source_inner_frame, text=nome_sorgente,
-                                                   value=nome_sorgente, variable=sorgente_var,
-                                                   border_width_checked=2,
-                                                   fg_color="#0066ff",
-                                                   hover_color="#0052cc")
-                source_option.pack(anchor="w", padx=15, pady=8)
-        else:
-            # Mostra messaggio se non ci sono sorgenti disponibili
-            no_source_label = ctk.CTkLabel(source_inner_frame, text="Nessuna sorgente video trovata")
-            no_source_label.pack(anchor="w", padx=15, pady=8)
-
-    # Collega il pulsante di scansione alla funzione
-    scan_btn.configure(command=rescansiona_sorgenti)
-
+    # Funzione per avviare la fotocamera virtuale
     def avvia():
-        global running
+        sorgente_selezionata = sorgente_var.get()
+        modello_selezionato = modello_var.get()
 
-        if not sorgenti_disponibili:
-            messagebox = ctk.CTkMessageBox(title="Errore",
-                                           message="Nessuna sorgente video disponibile.",
-                                           icon="cancel")
-            return
+        if sorgente_selezionata in sorgenti_disponibili:
+            sorgente_id = sorgenti_disponibili[sorgente_selezionata]
+            # Avvia la fotocamera virtuale in un thread separato
+            thread = threading.Thread(target=avvia_fotocamera_virtuale, args=(sorgente_id, modello_selezionato))
+            thread.daemon = True
+            thread.start()
 
-        sorgente = sorgenti_disponibili[sorgente_var.get()]
-        modello = modello_var.get()
+            # Abilita il cambio modello durante l'esecuzione
+            for btn in bottoni_cambio_modello:
+                btn.configure(state="normal", fg_color="#0066ff", hover_color="#0052cc")
+            avvia_btn.configure(state="disabled")
+            stop_btn.configure(state="normal")
 
-        # Disabilita il pulsante di avvio e abilita quello di stop
-        avvia_btn.configure(state="disabled")
-        stop_btn.configure(state="normal")
+            # Disabilita gli slider durante l'esecuzione
+            frame_skip_slider.configure(state="disabled")
+            resolution_slider.configure(state="disabled")
+            preview_switch.configure(state="disabled")
 
-        # Abilita i pulsanti di cambio modello
-        for btn in bottoni_cambio_modello:
-            btn.configure(state="normal")
-
-        # Avvia in un thread separato per non bloccare l'interfaccia
-        threading.Thread(target=lambda: avvia_fotocamera_virtuale(sorgente, modello),
-                         daemon=True).start()
-
+    # Funzione per fermare la fotocamera virtuale
     def ferma():
-        global running, processed_frame, syphon_server
-
+        global running, processed_frame
         running = False
-        processed_frame = None
 
-        # Ripristina l'interfaccia
-        stop_btn.configure(state="disabled")
+        # Aspetta un po' per assicurarsi che i thread siano terminati
+        time.sleep(0.3)
+
+        # Reimposta frame_queue e processed_frame
+        with process_frame_lock:
+            processed_frame = None
+
+        while not frame_queue.empty():
+            frame_queue.get()
+            frame_queue.task_done()
+
+        # Libera memoria
+        gc.collect()
+        if device == "cuda":
+            torch.cuda.empty_cache()
+
         avvia_btn.configure(state="normal")
-
-        # Disabilita i pulsanti di cambio modello
+        stop_btn.configure(state="disabled")
         for btn in bottoni_cambio_modello:
-            btn.configure(state="disabled")
+            btn.configure(state="disabled", fg_color="#2b2b2b", hover_color="#353535")
 
-        # Assicuriamoci che le risorse siano rilasciate
-        if IS_MACOS and syphon_server:
-            syphon_server = None
+        # Riabilita gli slider dopo aver fermato
+        frame_skip_slider.configure(state="normal")
+        resolution_slider.configure(state="normal")
+        preview_switch.configure(state="normal")
 
-        # Pulizia memoria
-        if 'model' in globals() and model is not None:
-            torch.cuda.empty_cache() if device == "cuda" else gc.collect()
-
-    # Collega i pulsanti alle rispettive funzioni
+    # Collega le funzioni ai pulsanti
     avvia_btn.configure(command=avvia)
     stop_btn.configure(command=ferma)
 
-    # Funzione da eseguire alla chiusura dell'app
-    def on_closing():
-        global running
-        if running:
-            ferma()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", on_closing)
-
-    # Avvia il loop principale
+    # Avvia il loop principale della GUI
     root.mainloop()
 
 
 if __name__ == "__main__":
+    # Prima di avviare, verifica i requisiti
+    try:
+        import __main__
+        import pyvirtualcam
+    except ImportError:
+        print("Pacchetto 'pyvirtualcam' non installato.")
+        print("Installa con: pip install pyvirtualcam")
+        print("Potrebbe essere necessario anche installare OBS Virtual Camera")
+        exit(1)
+
     crea_interfaccia_grafica()
