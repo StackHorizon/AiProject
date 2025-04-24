@@ -49,32 +49,94 @@ show_preview = True  # Mostra anteprima (disattivare per prestazioni migliori)
 # Funzione per individuare le sorgenti video disponibili
 def trova_sorgenti_video():
     sorgenti = {}
+    sistema = platform.system()
 
-    # Prima prova le sorgenti standard (0, 1, 2)
-    for indice in range(3):  # Limita a 3 sorgenti massime
-        cap = cv2.VideoCapture(indice)
-        if cap.isOpened():
-            ret, _ = cap.read()
-            if ret:
-                nome = f"Sorgente {indice}"
-                if indice == 0:
-                    nome = "Webcam principale"
-                sorgenti[nome] = indice
-            cap.release()
+    print(f"Ricerca dispositivi video su {sistema}...")
 
-    # Se su macOS e nessuna sorgente trovata, prova specificamente l'indice 0
-    if len(sorgenti) == 0 and platform.system() == "Darwin":
-        print("Tentativo di accesso specifico alla webcam principale...")
-        cap = cv2.VideoCapture(0)
-        if cap.isOpened():
-            sorgenti["Webcam macOS"] = 0
-        cap.release()
+    # Definisci più indici da controllare in base al sistema
+    max_indici = 10 if sistema == "Darwin" else 5
 
-    # Se non ci sono ancora sorgenti, aggiungi un messaggio
+    # Prima controlla i dispositivi standard
+    for indice in range(max_indici):
+        try:
+            cap = cv2.VideoCapture(indice)
+            if cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    nome = f"Sorgente {indice}"
+                    if indice == 0:
+                        nome = "Webcam principale"
+                    sorgenti[nome] = indice
+                    print(f"Trovata: {nome}")
+                cap.release()
+        except Exception as e:
+            print(f"Errore durante l'accesso all'indice {indice}: {e}")
+
+    # Ricerca specifica per OBS Virtual Camera su macOS
+    if sistema == "Darwin":
+        print("Cercando OBS Virtual Camera...")
+        try:
+            # Su macOS, OBS Virtual Camera potrebbe essere accessibile con
+            # backend specifici o indici diversi
+            apis_to_try = [
+                cv2.CAP_ANY,
+                cv2.CAP_AVFOUNDATION
+            ]
+
+            # Prova diversi indici con backend specifici
+            for api in apis_to_try:
+                for idx in range(max_indici):
+                    try:
+                        cap = cv2.VideoCapture(idx + api)
+                        if cap.isOpened():
+                            ret, frame = cap.read()
+                            if ret and frame is not None:
+                                # Prova a ottenere informazioni sul dispositivo
+                                cam_name = f"Dispositivo {idx}"
+
+                                # Su alcuni sistemi possiamo ottenere il nome del dispositivo
+                                try:
+                                    prop_name = getattr(cv2, 'CAP_PROP_DEVICE_NAME', None)
+                                    if prop_name:
+                                        device_name = cap.get(prop_name)
+                                        if device_name and "obs" in device_name.lower():
+                                            cam_name = "OBS Virtual Camera"
+                                except:
+                                    pass
+
+                                if f"Sorgente {idx}" not in sorgenti and cam_name not in sorgenti:
+                                    sorgenti[cam_name] = idx
+                                    print(f"Trovata: {cam_name} (indice {idx})")
+                            cap.release()
+                    except:
+                        pass
+        except Exception as e:
+            print(f"Errore nella ricerca di OBS Virtual Camera: {e}")
+
+        # Metodo specifico per trovare OBS Virtual Camera su macOS
+        if "OBS Virtual Camera" not in [k for k in sorgenti.keys()]:
+            try:
+                # Cerca nei percorsi specifici macOS per OBS
+                import subprocess
+                cmd = ['ls', '/Library/CoreMediaIO/Plug-Ins/DAL/']
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if 'obs-mac-virtualcam.plugin' in result.stdout:
+                    print("Trovato plugin OBS Virtual Camera, ma non accessibile direttamente")
+                    # Aggiungi un messaggio per l'utente
+                    sorgenti["⚠️ OBS Virtual Camera (avvia OBS prima)"] = -1
+            except:
+                pass
+
     if len(sorgenti) == 0:
-        print("Nessuna sorgente video trovata!")
+        print("⚠️ Nessuna sorgente video trovata!")
+
+        if sistema == "Darwin":
+            print("Su macOS, assicurati di:")
+            print("1. Aver concesso i permessi per la fotocamera all'applicazione")
+            print("2. Aver installato e avviato OBS Virtual Camera")
+            print("3. Aver riavviato l'applicazione dopo aver avviato OBS")
     else:
-        print(f"Trovate {len(sorgenti)} sorgenti video")
+        print(f"✅ Trovate {len(sorgenti)} sorgenti video")
 
     return sorgenti
 
@@ -202,10 +264,20 @@ def elaborazione_thread(width, height):
 def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
     global running, current_model_name, processed_frame, model, skip_frames, processing_resolution, show_preview
 
+    # Gestione speciale per OBS Virtual Camera su macOS
+    if sorgente_id == -1 and platform.system() == "Darwin":
+        messagebox.showinfo(
+            "OBS Virtual Camera su macOS",
+            "Per utilizzare OBS Virtual Camera su macOS:\n\n"
+            "1. Apri OBS Studio\n"
+            "2. Vai su Strumenti > Virtual Camera > Avvia\n"
+            "3. Riavvia questa applicazione e seleziona nuovamente la sorgente"
+        )
+        return
+
     # Inizializza il modello
     model = carica_modello(modello_iniziale)
     current_model_name = modello_iniziale
-
     # Ottieni la dimensione del video
     cap = cv2.VideoCapture(sorgente_id)
     if not cap.isOpened():
