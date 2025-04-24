@@ -13,6 +13,12 @@ import threading
 from queue import Queue
 import gc
 
+try:
+    available_backends = pyvirtualcam.get_available_backends()
+    print(f"Backend pyvirtualcam disponibili: {available_backends}")
+except Exception as e:
+    print(f"Errore nell'inizializzazione di pyvirtualcam: {e}")
+    available_backends = []
 # Controlla se è disponibile la GPU
 if torch.cuda.is_available():
     device = "cuda"
@@ -49,94 +55,32 @@ show_preview = True  # Mostra anteprima (disattivare per prestazioni migliori)
 # Funzione per individuare le sorgenti video disponibili
 def trova_sorgenti_video():
     sorgenti = {}
-    sistema = platform.system()
 
-    print(f"Ricerca dispositivi video su {sistema}...")
+    # Prima prova le sorgenti standard (0, 1, 2)
+    for indice in range(3):  # Limita a 3 sorgenti massime
+        cap = cv2.VideoCapture(indice)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                nome = f"Sorgente {indice}"
+                if indice == 0:
+                    nome = "Webcam principale"
+                sorgenti[nome] = indice
+            cap.release()
 
-    # Definisci più indici da controllare in base al sistema
-    max_indici = 10 if sistema == "Darwin" else 5
+    # Se su macOS e nessuna sorgente trovata, prova specificamente l'indice 0
+    if len(sorgenti) == 0 and platform.system() == "Darwin":
+        print("Tentativo di accesso specifico alla webcam principale...")
+        cap = cv2.VideoCapture(0)
+        if cap.isOpened():
+            sorgenti["Webcam macOS"] = 0
+        cap.release()
 
-    # Prima controlla i dispositivi standard
-    for indice in range(max_indici):
-        try:
-            cap = cv2.VideoCapture(indice)
-            if cap.isOpened():
-                ret, frame = cap.read()
-                if ret and frame is not None:
-                    nome = f"Sorgente {indice}"
-                    if indice == 0:
-                        nome = "Webcam principale"
-                    sorgenti[nome] = indice
-                    print(f"Trovata: {nome}")
-                cap.release()
-        except Exception as e:
-            print(f"Errore durante l'accesso all'indice {indice}: {e}")
-
-    # Ricerca specifica per OBS Virtual Camera su macOS
-    if sistema == "Darwin":
-        print("Cercando OBS Virtual Camera...")
-        try:
-            # Su macOS, OBS Virtual Camera potrebbe essere accessibile con
-            # backend specifici o indici diversi
-            apis_to_try = [
-                cv2.CAP_ANY,
-                cv2.CAP_AVFOUNDATION
-            ]
-
-            # Prova diversi indici con backend specifici
-            for api in apis_to_try:
-                for idx in range(max_indici):
-                    try:
-                        cap = cv2.VideoCapture(idx + api)
-                        if cap.isOpened():
-                            ret, frame = cap.read()
-                            if ret and frame is not None:
-                                # Prova a ottenere informazioni sul dispositivo
-                                cam_name = f"Dispositivo {idx}"
-
-                                # Su alcuni sistemi possiamo ottenere il nome del dispositivo
-                                try:
-                                    prop_name = getattr(cv2, 'CAP_PROP_DEVICE_NAME', None)
-                                    if prop_name:
-                                        device_name = cap.get(prop_name)
-                                        if device_name and "obs" in device_name.lower():
-                                            cam_name = "OBS Virtual Camera"
-                                except:
-                                    pass
-
-                                if f"Sorgente {idx}" not in sorgenti and cam_name not in sorgenti:
-                                    sorgenti[cam_name] = idx
-                                    print(f"Trovata: {cam_name} (indice {idx})")
-                            cap.release()
-                    except:
-                        pass
-        except Exception as e:
-            print(f"Errore nella ricerca di OBS Virtual Camera: {e}")
-
-        # Metodo specifico per trovare OBS Virtual Camera su macOS
-        if "OBS Virtual Camera" not in [k for k in sorgenti.keys()]:
-            try:
-                # Cerca nei percorsi specifici macOS per OBS
-                import subprocess
-                cmd = ['ls', '/Library/CoreMediaIO/Plug-Ins/DAL/']
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if 'obs-mac-virtualcam.plugin' in result.stdout:
-                    print("Trovato plugin OBS Virtual Camera, ma non accessibile direttamente")
-                    # Aggiungi un messaggio per l'utente
-                    sorgenti["⚠️ OBS Virtual Camera (avvia OBS prima)"] = -1
-            except:
-                pass
-
+    # Se non ci sono ancora sorgenti, aggiungi un messaggio
     if len(sorgenti) == 0:
-        print("⚠️ Nessuna sorgente video trovata!")
-
-        if sistema == "Darwin":
-            print("Su macOS, assicurati di:")
-            print("1. Aver concesso i permessi per la fotocamera all'applicazione")
-            print("2. Aver installato e avviato OBS Virtual Camera")
-            print("3. Aver riavviato l'applicazione dopo aver avviato OBS")
+        print("Nessuna sorgente video trovata!")
     else:
-        print(f"✅ Trovate {len(sorgenti)} sorgenti video")
+        print(f"Trovate {len(sorgenti)} sorgenti video")
 
     return sorgenti
 
@@ -261,6 +205,7 @@ def elaborazione_thread(width, height):
 
 
 # Funzione principale che gestisce la fotocamera virtuale
+# Funzione principale che gestisce la fotocamera virtuale
 def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
     global running, current_model_name, processed_frame, model, skip_frames, processing_resolution, show_preview
 
@@ -275,7 +220,6 @@ def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
         messagebox.showerror("Errore",
                              f"Impossibile aprire la sorgente video {sorgente_id}.\nAssicurati che la webcam sia collegata e non in uso da altre applicazioni.")
         return
-
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -299,75 +243,59 @@ def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
     while processed_frame is None and running:
         time.sleep(0.1)
 
-    # Gestione specifica per macOS
-    if platform.system() == "Darwin":
-        # Su macOS, non creiamo una fotocamera virtuale ma mostriamo i frame elaborati
-        # che l'utente può catturare con OBS
-        messagebox.showinfo(
-            "Modalità macOS",
-            "Su macOS, il video elaborato verrà mostrato in una finestra.\n\n"
-            "Per usarlo come fotocamera virtuale:\n"
-            "1. Apri OBS Studio\n"
-            "2. Aggiungi una sorgente 'Cattura finestra'\n"
-            "3. Seleziona la finestra 'Cartoon AI Preview'\n"
-            "4. Avvia la Virtual Camera di OBS"
-        )
+    # Verifica disponibilità webcam virtuale
+    try:
+        # Ottieni i backend disponibili
+        available_backends = pyvirtualcam.get_available_backends()
+        print(f"Backend disponibili: {available_backends}")
 
-        try:
+        # Su macOS, preferisci 'cmio' se disponibile
+        backend = None
+        if platform.system() == "Darwin" and "cmio" in available_backends:
+            backend = "cmio"
+
+        # Tenta di avviare la webcam virtuale
+        with pyvirtualcam.Camera(width=width, height=height, fps=fps,
+                                 fmt=pyvirtualcam.PixelFormat.BGR,
+                                 backend=backend) as cam:
+            print(f"Fotocamera virtuale avviata: {cam.device} (backend: {cam.backend})")
+
             while running:
-                # Mostra il frame elaborato
                 with process_frame_lock:
-                    if processed_frame is not None:
-                        current_frame = processed_frame.copy()
-                    else:
-                        current_frame = np.zeros((height, width, 3), dtype=np.uint8)
+                    current_frame = processed_frame.copy() if processed_frame is not None else np.zeros(
+                        (height, width, 3), dtype=np.uint8)
 
-                # Mostra sempre l'anteprima su macOS
-                cv2.imshow('AnimeGAN Preview', current_frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                cam.send(current_frame)
 
-                # Limita il framerate
-                time.sleep(1 / fps)
-        except Exception as e:
-            print(f"Errore durante l'esecuzione in modalità macOS: {e}")
-    else:
-        # Su Windows e altri sistemi, usa pyvirtualcam normalmente
-        try:
-            with pyvirtualcam.Camera(width=width, height=height, fps=fps, fmt=pyvirtualcam.PixelFormat.BGR) as cam:
-                print(f"Fotocamera virtuale avviata: {cam.device}")
+                if show_preview:
+                    cv2.imshow('AnimeGAN Preview', current_frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
 
-                while running:
-                    with process_frame_lock:
-                        if processed_frame is not None:
-                            current_frame = processed_frame.copy()
-                        else:
-                            current_frame = np.zeros((height, width, 3), dtype=np.uint8)
+                cam.sleep_until_next_frame()
 
-                    # Invia il frame alla fotocamera virtuale
-                    cam.send(current_frame)
+    except Exception as e:
+        print(f"Errore con la fotocamera virtuale: {e}")
+        messagebox.showwarning("Modalità solo anteprima",
+                               f"Webcam virtuale non disponibile: {e}\n\n"
+                               "Su macOS è necessario installare e configurare OBS Virtual Camera:\n"
+                               "1. Installa OBS Studio (https://obsproject.com)\n"
+                               "2. Avvia OBS e attiva 'Start Virtual Camera' una volta\n\n"
+                               "Verrà mostrata solo l'anteprima locale.")
 
-                    # Visualizza anteprima se attivata
-                    if show_preview:
-                        cv2.imshow('AnimeGAN Preview', current_frame)
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                            break
+        # Fallback a modalità solo anteprima locale
+        while running:
+            with process_frame_lock:
+                if processed_frame is not None:
+                    cv2.imshow('AnimeGAN (Solo anteprima)', processed_frame.copy())
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+            time.sleep(1 / fps)
 
-                    # Sincronizza con la frequenza della fotocamera virtuale
-                    cam.sleep_until_next_frame()
-
-        except Exception as e:
-            print(f"Errore con la fotocamera virtuale: {e}")
-
-            if platform.system() == "Windows":
-                messagebox.showerror("Errore",
-                                     f"Problema con la fotocamera virtuale: {e}\n\nVerifica che OBS sia installato.")
-
-    # Pulisci risorse
-    if show_preview or platform.system() == "Darwin":
+    # Pulizia risorse
+    if show_preview:
         cv2.destroyAllWindows()
 
-    # Reset il frame elaborato
     with process_frame_lock:
         processed_frame = None
 
