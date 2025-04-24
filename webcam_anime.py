@@ -13,12 +13,6 @@ import threading
 from queue import Queue
 import gc
 
-try:
-    available_backends = pyvirtualcam.get_available_backends()
-    print(f"Backend pyvirtualcam disponibili: {available_backends}")
-except Exception as e:
-    print(f"Errore nell'inizializzazione di pyvirtualcam: {e}")
-    available_backends = []
 # Controlla se è disponibile la GPU
 if torch.cuda.is_available():
     device = "cuda"
@@ -205,15 +199,12 @@ def elaborazione_thread(width, height):
 
 
 # Funzione principale che gestisce la fotocamera virtuale
-# Funzione principale che gestisce la fotocamera virtuale
 def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
     global running, current_model_name, processed_frame, model, skip_frames, processing_resolution, show_preview
 
-    # Inizializza il modello
     model = carica_modello(modello_iniziale)
     current_model_name = modello_iniziale
 
-    # Ottieni la dimensione del video
     cap = cv2.VideoCapture(sorgente_id)
     if not cap.isOpened():
         print(f"Errore: Impossibile aprire la sorgente video {sorgente_id}")
@@ -225,77 +216,53 @@ def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 0:
         fps = 30
-
     cap.release()
 
-    # Inizia i thread per acquisizione ed elaborazione
     running = True
     acq_thread = threading.Thread(target=acquisizione_thread, args=(sorgente_id,))
     elab_thread = threading.Thread(target=elaborazione_thread, args=(width, height))
-
     acq_thread.daemon = True
     elab_thread.daemon = True
-
     acq_thread.start()
     elab_thread.start()
 
-    # Aspetta che il primo frame sia pronto
     while processed_frame is None and running:
         time.sleep(0.1)
 
-    # Verifica disponibilità webcam virtuale
-    try:
-        # Ottieni i backend disponibili
-        available_backends = pyvirtualcam.get_available_backends()
-        print(f"Backend disponibili: {available_backends}")
-
-        # Su macOS, preferisci 'cmio' se disponibile
-        backend = None
-        if platform.system() == "Darwin" and "cmio" in available_backends:
-            backend = "cmio"
-
-        # Tenta di avviare la webcam virtuale
-        with pyvirtualcam.Camera(width=width, height=height, fps=fps,
-                                 fmt=pyvirtualcam.PixelFormat.BGR,
-                                 backend=backend) as cam:
-            print(f"Fotocamera virtuale avviata: {cam.device} (backend: {cam.backend})")
-
-            while running:
-                with process_frame_lock:
-                    current_frame = processed_frame.copy() if processed_frame is not None else np.zeros(
-                        (height, width, 3), dtype=np.uint8)
-
-                cam.send(current_frame)
-
-                if show_preview:
-                    cv2.imshow('AnimeGAN Preview', current_frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
-
-                cam.sleep_until_next_frame()
-
-    except Exception as e:
-        print(f"Errore con la fotocamera virtuale: {e}")
-        messagebox.showwarning("Modalità solo anteprima",
-                               f"Webcam virtuale non disponibile: {e}\n\n"
-                               "Su macOS è necessario installare e configurare OBS Virtual Camera:\n"
-                               "1. Installa OBS Studio (https://obsproject.com)\n"
-                               "2. Avvia OBS e attiva 'Start Virtual Camera' una volta\n\n"
-                               "Verrà mostrata solo l'anteprima locale.")
-
-        # Fallback a modalità solo anteprima locale
+    # --- MODIFICA QUI ---
+    if platform.system() == "Darwin":
+        print("macOS rilevato: la virtual cam non è supportata direttamente. Usa la finestra di anteprima in OBS.")
         while running:
             with process_frame_lock:
                 if processed_frame is not None:
-                    cv2.imshow('AnimeGAN (Solo anteprima)', processed_frame.copy())
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
-            time.sleep(1 / fps)
+                    current_frame = processed_frame.copy()
+                else:
+                    current_frame = np.zeros((height, width, 3), dtype=np.uint8)
+            cv2.imshow('AnimeGAN Preview (Cattura questa finestra in OBS)', current_frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            time.sleep(1.0 / fps)
+    else:
+        try:
+            with pyvirtualcam.Camera(width=width, height=height, fps=fps, fmt=pyvirtualcam.PixelFormat.BGR) as cam:
+                print(f"Fotocamera virtuale avviata: {cam.device}")
+                while running:
+                    with process_frame_lock:
+                        if processed_frame is not None:
+                            current_frame = processed_frame.copy()
+                        else:
+                            current_frame = np.zeros((height, width, 3), dtype=np.uint8)
+                    cam.send(current_frame)
+                    if show_preview:
+                        cv2.imshow('AnimeGAN Preview', current_frame)
+                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                            break
+                    cam.sleep_until_next_frame()
+        except Exception as e:
+            print(f"Errore con la fotocamera virtuale: {e}")
 
-    # Pulizia risorse
-    if show_preview:
+    if show_preview or platform.system() == "Darwin":
         cv2.destroyAllWindows()
-
     with process_frame_lock:
         processed_frame = None
 
