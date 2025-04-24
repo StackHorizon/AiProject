@@ -46,35 +46,117 @@ show_preview = True  # Mostra anteprima (disattivare per prestazioni migliori)
 
 
 # Funzione per individuare le sorgenti video disponibili
-# Funzione per individuare le sorgenti video disponibili
 def trova_sorgenti_video():
     sorgenti = {}
 
-    # Prima prova le sorgenti standard (0, 1, 2)
-    for indice in range(3):  # Limita a 3 sorgenti massime
-        cap = cv2.VideoCapture(indice)
-        if cap.isOpened():
-            ret, _ = cap.read()
-            if ret:
-                nome = f"Sorgente {indice}"
-                if indice == 0:
-                    nome = "Webcam principale"
-                sorgenti[nome] = indice
+    # Metodo 1: Approccio iterativo standard ma più esteso e con migliore gestione errori
+    for indice in range(8):  # Aumenta il range per cercare più dispositivi
+        try:
+            cap = cv2.VideoCapture(indice)
+            if cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    nome = f"Webcam {indice}"
+                    if indice == 0:
+                        nome = "Webcam principale"
+                    sorgenti[nome] = indice
+                    print(f"Trovata webcam {indice}: {cap.getBackendName()}")
             cap.release()
+        except Exception as e:
+            print(f"Errore durante il test della webcam {indice}: {e}")
 
-    # Se su macOS e nessuna sorgente trovata, prova specificamente l'indice 0
-    if len(sorgenti) == 0 and platform.system() == "Darwin":
-        print("Tentativo di accesso specifico alla webcam principale...")
-        cap = cv2.VideoCapture(0)
-        if cap.isOpened():
-            sorgenti["Webcam macOS"] = 0
-        cap.release()
+    # Metodo 2: Prova con indici diretti su Windows
+    if platform.system() == "Windows" and len(sorgenti) == 0:
+        try:
+            # DirectShow in Windows: prova con CAP_DSHOW
+            for indice in range(3):
+                try:
+                    cap = cv2.VideoCapture(indice, cv2.CAP_DSHOW)
+                    if cap.isOpened():
+                        ret, frame = cap.read()
+                        if ret:
+                            nome = f"DirectShow Webcam {indice}"
+                            if indice == 0:
+                                nome = "Webcam principale (DirectShow)"
+                            sorgenti[nome] = indice
+                            print(f"Trovata webcam DirectShow {indice}")
+                    cap.release()
+                except:
+                    pass
+        except:
+            pass
 
-    # Se non ci sono ancora sorgenti, aggiungi un messaggio
+    # Metodo 3: Su macOS, prova con il backend specifico AVFoundation
+    if platform.system() == "Darwin" and len(sorgenti) == 0:
+        try:
+            for indice in range(3):
+                try:
+                    cap = cv2.VideoCapture(indice, cv2.CAP_AVFOUNDATION)
+                    if cap.isOpened():
+                        ret, frame = cap.read()
+                        if ret:
+                            nome = f"AVFoundation Webcam {indice}"
+                            if indice == 0:
+                                nome = "Webcam principale (AVFoundation)"
+                            sorgenti[nome] = indice
+                            print(f"Trovata webcam AVFoundation {indice}")
+                    cap.release()
+                except:
+                    pass
+        except:
+            pass
+
+    # Metodo alternativo: elenca tutti i backend disponibili e prova con ciascuno
     if len(sorgenti) == 0:
-        print("Nessuna sorgente video trovata!")
-    else:
-        print(f"Trovate {len(sorgenti)} sorgenti video")
+        print("Tentativo con backend alternativi...")
+        backends = [cv2.CAP_ANY, cv2.CAP_DSHOW, cv2.CAP_MSMF]
+        if hasattr(cv2, 'CAP_AVFOUNDATION'):
+            backends.append(cv2.CAP_AVFOUNDATION)
+
+        for backend in backends:
+            for indice in range(2):  # Solo i primi due indici per velocità
+                try:
+                    cap = cv2.VideoCapture(indice, backend)
+                    if cap.isOpened():
+                        ret, frame = cap.read()
+                        if ret:
+                            backend_name = str(backend)
+                            nome = f"Webcam {indice} (backend {backend_name})"
+                            sorgenti[nome] = indice
+                            print(f"Trovata webcam con backend {backend_name}")
+                    cap.release()
+                except:
+                    pass
+
+    # Metodo di ultima risorsa: prova a usare lo specifico nome del dispositivo
+    if platform.system() == "Windows" and len(sorgenti) == 0:
+        try:
+            # Alcuni nomi comuni di webcam
+            camera_names = [
+                "Microsoft® LifeCam",
+                "Integrated Webcam",
+                "USB Video Device",
+                "Camera",
+                "HD Camera"
+            ]
+            for name in camera_names:
+                try:
+                    cap = cv2.VideoCapture(name, cv2.CAP_DSHOW)
+                    if cap.isOpened():
+                        ret, frame = cap.read()
+                        if ret:
+                            sorgenti[f"Webcam: {name}"] = name
+                    cap.release()
+                except:
+                    pass
+        except:
+            pass
+
+    # Se ancora non funziona, aggiungi almeno una opzione di default
+    if len(sorgenti) == 0:
+        print("ATTENZIONE: Nessuna webcam rilevata automaticamente!")
+        print("Aggiunta opzione di default (potrebbe non funzionare)")
+        sorgenti["Default camera (0)"] = 0
 
     return sorgenti
 
