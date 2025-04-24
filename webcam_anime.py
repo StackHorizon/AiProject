@@ -309,7 +309,7 @@ def avvia_fotocamera_virtuale(sorgente_id, modello_iniziale):
             "Per usarlo come fotocamera virtuale:\n"
             "1. Apri OBS Studio\n"
             "2. Aggiungi una sorgente 'Cattura finestra'\n"
-            "3. Seleziona la finestra 'AnimeGAN Preview'\n"
+            "3. Seleziona la finestra 'Cartoon AI Preview'\n"
             "4. Avvia la Virtual Camera di OBS"
         )
 
