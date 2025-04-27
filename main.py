@@ -1,4 +1,4 @@
-# main.py - Ottimizzato per prestazioni massime con risoluzione manuale
+# main.py - Ottimizzato per prestazioni su macOS
 import cv2
 import numpy as np
 import threading
@@ -14,6 +14,7 @@ import importlib
 import platform
 import subprocess
 from PIL import Image
+import ctypes
 
 
 # Verifica e installa dipendenze
@@ -42,52 +43,70 @@ def importlib_check(name):
         return False
 
 
-# Ottimizzazioni specifiche per sistema operativo
+# Ottimizzazioni specifiche per macOS
 def setup_high_priority():
     system = platform.system()
 
-    if system == "Windows":
+    if system == "Darwin":  # macOS
         try:
-            import psutil
-            process = psutil.Process(os.getpid())
-            process.nice(psutil.HIGH_PRIORITY_CLASS)
-            print("✅ Priorità elevata impostata su Windows")
-        except Exception as e:
-            print(f"⚠️ Impossibile impostare priorità elevata: {e}")
+            # Imposta sia il processo principale che i thread in modalità real-time
+            os.system(
+                f"sudo -n chrt -r -p 99 {os.getpid()} 2>/dev/null || sudo -n renice -20 -p {os.getpid()} 2>/dev/null || renice -10 -p {os.getpid()}")
 
-    elif system == "Darwin":  # macOS
-        try:
-            os.system(f"sudo -n renice -n -10 -p {os.getpid()} 2>/dev/null || renice -n -10 -p {os.getpid()}")
+            # Disabilita sleep per migliorare responsività
+            os.system("caffeinate -d -i -m -s &")
+
             print("✅ Priorità elevata impostata su macOS")
         except Exception as e:
             print(f"⚠️ Impossibile impostare priorità elevata: {e}")
 
-    # Ottimizzazioni OpenCV
-    cv2.setNumThreads(mp.cpu_count())
+        # Ottimizzazione thread OpenCV per macOS (numero ideale per M1/M2)
+        cv2.setNumThreads(min(4, mp.cpu_count()))
+    else:
+        # Configurazione standard per altri sistemi
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            process.nice(psutil.HIGH_PRIORITY_CLASS if system == "Windows" else -10)
+        except Exception:
+            pass
+        cv2.setNumThreads(mp.cpu_count())
 
     # Impostiamo flag di ottimizzazione per OpenCV
     cv2.setUseOptimized(True)
 
 
-# Caricamento modello ultra-ottimizzato con TorchScript e quantizzazione
+# Caricamento modello ottimizzato per macOS
 def load_optimized_model(model_name, device):
-    print(f"Caricamento modello ottimizzato: {model_name}")
+    print(f"Caricamento modello ottimizzato per {platform.system()}: {model_name}")
 
     # Crea directory se non esiste
     os.makedirs("models", exist_ok=True)
-    jit_path = os.path.join("models", f"{model_name}_jit_quantized.pt")
+
+    # Su macOS, preferisci MPS se disponibile (Metal Performance Shaders)
+    if platform.system() == "Darwin" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("✅ Utilizzo accelerazione Metal (MPS)")
+        jit_path = os.path.join("models", f"{model_name}_mps.pt")
+    else:
+        jit_path = os.path.join("models", f"{model_name}_jit_quantized.pt")
 
     try:
         # Caricamento diretto JIT se già esistente
         if os.path.exists(jit_path):
             model = torch.jit.load(jit_path, map_location=device)
-            print("✅ Modello JIT quantizzato caricato dalla cache")
+            print("✅ Modello JIT caricato dalla cache")
             return model
 
         # Altrimenti carica e ottimizza il modello PyTorch
         model = load_torch_model(model_name, device)
 
-        # Conversione a JIT con quantizzazione
+        # Per macOS, usiamo un'ottimizzazione specifica per MPS
+        if device.type == 'mps':
+            # Non facciamo jit trace su MPS (può causare problemi)
+            return model
+
+        # Conversione a JIT con quantizzazione per altri dispositivi
         try:
             dummy_input = torch.randn(1, 3, 384, 384, device=device)
             if device.type == 'cuda':
@@ -98,13 +117,13 @@ def load_optimized_model(model_name, device):
                 traced_model = torch.jit.trace(model, dummy_input)
 
             # Quantizza il modello se non è su GPU
-            if device.type != 'cuda':
+            if device.type not in ['cuda', 'mps']:
                 traced_model = torch.quantization.quantize_dynamic(
                     traced_model, {torch.nn.Linear, torch.nn.Conv2d}, dtype=torch.qint8
                 )
 
             traced_model.save(jit_path)
-            print("✅ Modello JIT ottimizzato, quantizzato e salvato")
+            print("✅ Modello JIT ottimizzato e salvato")
             return traced_model
 
         except Exception as e:
@@ -116,7 +135,7 @@ def load_optimized_model(model_name, device):
         return load_torch_model(model_name, device)
 
 
-# Caricamento modello PyTorch standard
+# Caricamento modello PyTorch con ottimizzazioni macOS
 def load_torch_model(model_name, device):
     print(f"Caricamento modello PyTorch: {model_name}")
 
@@ -130,26 +149,36 @@ def load_torch_model(model_name, device):
 
     # Ottimizzazioni per GPU
     if device.type == 'cuda':
-        model = model.half()  # Usa half precision (FP16) per velocità
+        model = model.half()
 
-        # Disabilita gradient tracking per inferenza
+        for param in model.parameters():
+            param.requires_grad = False
+    elif device.type == 'mps':
+        # Ottimizzazioni specifiche per Metal (macOS)
         for param in model.parameters():
             param.requires_grad = False
     else:
-        # Ottimizzazioni specifiche per CPU
-        # Setta thread interni di PyTorch
-        torch.set_num_threads(mp.cpu_count())
+        # Ottimizzazioni specifiche per CPU su macOS
+        if platform.system() == "Darwin":
+            # Su macOS, impostare i thread in maniera conservativa
+            torch.set_num_threads(min(4, mp.cpu_count()))
+        else:
+            torch.set_num_threads(mp.cpu_count())
+
         # Abilita optimized memory layout
         torch.set_flush_denormal(True)
 
-    print("✅ Modello PyTorch caricato")
-    torch.cuda.empty_cache() if device.type == 'cuda' else None
+    print(f"✅ Modello PyTorch caricato su {device}")
+
+    # Pulizia memoria
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
     gc.collect()
 
     return model
 
 
-# Buffer pre-allocati per evitare allocazioni continue
+# Buffer pre-allocati ottimizzati per macOS
 input_tensor_cache = {}
 transform_cache = {}
 
@@ -167,31 +196,38 @@ def get_input_tensor(size, device):
     return input_tensor_cache[key]
 
 
-# Pipeline di elaborazione ultra-ottimizzata per alte prestazioni
+# Pipeline di elaborazione ottimizzata per macOS
 def process_frame(frame, model, device, resolution, last_frame_hash=None):
     try:
         # Skip se il frame è identico al precedente (ultra-ottimizzato)
         if last_frame_hash is not None:
-            # Campionamento più aggressivo per confronto hash
-            curr_hash = hash(frame[::50, ::50, 0].tobytes())
+            # Su macOS, usiamo un campionamento ancora più aggressivo per ridurre il carico
+            stride = 100 if platform.system() == "Darwin" else 50
+            curr_hash = hash(frame[::stride, ::stride, 0].tobytes())
             if curr_hash == last_frame_hash:
                 return None, curr_hash
             last_frame_hash = curr_hash
 
-        # Mantiene la risoluzione definita dall'utente
+        # Ottimizzazione macOS: riduci subito il frame per elaborazioni successive
         h, w = frame.shape[:2]
         target_size = min(resolution, min(h, w))
         ratio = target_size / min(h, w)
         new_h, new_w = int(h * ratio), int(w * ratio)
 
-        # Ridimensionamento fast-path usando INTER_AREA (miglior compromesso velocità/qualità)
-        small_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        # Su macOS, usiamo INTER_NEAREST per la velocità massima durante il downscaling
+        if platform.system() == "Darwin":
+            small_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        else:
+            small_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-        # Converti BGR a RGB (solo i canali che servono)
+        # Converti BGR a RGB (ottimizzato per macOS, che ha problemi con le conversioni colore)
         rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-        # Allineamento a multipli di 32 per ottimizzazioni CUDA/simd
-        tensor_h, tensor_w = ((new_h + 31) // 32) * 32, ((new_w + 31) // 32) * 32
+        # Allineamento a multipli di 16 per macOS (invece di 32 per CUDA)
+        align_multiple = 16 if platform.system() == "Darwin" else 32
+        tensor_h = ((new_h + align_multiple - 1) // align_multiple) * align_multiple
+        tensor_w = ((new_w + align_multiple - 1) // align_multiple) * align_multiple
+
         input_tensor = get_input_tensor((tensor_h, tensor_w), device)
 
         # Converti immagine in tensor ottimizzato
@@ -210,12 +246,19 @@ def process_frame(frame, model, device, resolution, last_frame_hash=None):
         # Copia nel buffer pre-allocato
         with torch.no_grad():
             input_tensor.zero_()
-            input_tensor[:, :, :new_h, :new_w].copy_(img_tensor if device.type != 'cuda'
-                                                     else img_tensor.half())
+            if device.type == 'cuda':
+                input_tensor[:, :, :new_h, :new_w].copy_(img_tensor.half())
+            else:
+                input_tensor[:, :, :new_h, :new_w].copy_(img_tensor)
 
-            # Inferenza con profiling disabilitato per velocità
+            # Inferenza
             output = model(input_tensor[:, :, :new_h, :new_w])
-            torch.cuda.synchronize() if device.type == 'cuda' else None
+
+            # Sincronizza per Metal/CUDA
+            if device.type == 'mps':
+                torch.mps.synchronize()
+            elif device.type == 'cuda':
+                torch.cuda.synchronize()
 
             # Denormalizza e converti risultato
             result = (output[0, :, :new_h, :new_w].permute(1, 2, 0) * 0.5 + 0.5)
@@ -224,9 +267,12 @@ def process_frame(frame, model, device, resolution, last_frame_hash=None):
         # Converti RGB a BGR per OpenCV
         result_bgr = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
 
-        # Ridimensiona al formato originale con algoritmo veloce
+        # Ridimensiona al formato originale con algoritmo più veloce su macOS
         if new_h != h or new_w != w:
-            result_bgr = cv2.resize(result_bgr, (w, h), interpolation=cv2.INTER_LINEAR)
+            if platform.system() == "Darwin":
+                result_bgr = cv2.resize(result_bgr, (w, h), interpolation=cv2.INTER_NEAREST)
+            else:
+                result_bgr = cv2.resize(result_bgr, (w, h), interpolation=cv2.INTER_LINEAR)
 
         return result_bgr, last_frame_hash
 
@@ -240,8 +286,8 @@ def main(shared_state):
     setup_high_priority()
 
     # Configurazioni
-    frame_queue = Queue(maxsize=2)  # Aumentato a 2 per buffer migliore
-    result_queue = Queue(maxsize=2)
+    frame_queue = Queue(maxsize=1)  # Ridotto a 1 per macOS per ridurre latenza
+    result_queue = Queue(maxsize=1)
     running = True
 
     # Variabili per monitoraggio performance
@@ -250,36 +296,39 @@ def main(shared_state):
     fps = 0
     last_frame_hash = None
 
-    # Imposta dispositivo
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Utilizzando dispositivo: {device}")
+    # Imposta dispositivo - Supporto speciale per Metal su macOS
+    if platform.system() == "Darwin" and hasattr(torch, "backends") and hasattr(torch.backends,
+                                                                                "mps") and torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print(f"Utilizzando dispositivo: Metal (MPS) su MacOS")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Utilizzando dispositivo: {device}")
 
-    # Ottimizzazioni performance
-    if device.type == 'cuda':
-        # Ottimizzazioni CUDA
+    # Ottimizzazioni performance per macOS
+    if platform.system() == "Darwin":
+        # Riduci il buffer di OpenCV per macOS
+        cv2.setNumThreads(min(4, mp.cpu_count()))
+    elif device.type == 'cuda':
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.enabled = True
-
-        # Svuota cache GPU
         torch.cuda.empty_cache()
 
-    # Configura webcam con buffer minimo per bassa latenza
+    # Configura webcam con ottimizzazioni macOS
     cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Buffer minimo per bassa latenza
-    cap.set(cv2.CAP_PROP_FPS, 60)  # Richiedi massimo frame rate
 
-    # Ottimizzazioni aggiuntive per webcam
-    if platform.system() == "Windows":
-        # Accelerazione hardware e formato compresso
-        try:
-            cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        except Exception:
-            print("⚠️ Accelerazione hardware webcam non supportata")
+    # Su macOS, ridurre la risoluzione iniziale per migliorare performance
+    if platform.system() == "Darwin":
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    else:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    cap.set(cv2.CAP_PROP_FPS, 30)  # 30fps più stabile su macOS
 
     # Verifica apertura webcam
     if not cap.isOpened():
@@ -296,25 +345,16 @@ def main(shared_state):
     model = load_optimized_model(shared_state.current_model.value, device)
     model_lock = threading.Lock()
 
-    # Thread di elaborazione
+    # Thread di elaborazione ottimizzato per macOS
     def processing_worker():
         nonlocal running, last_frame_hash
 
-        try:
-            # Precarica thread e ottimizza affinity
-            if platform.system() == "Windows":
-                try:
-                    import psutil
-                    p = psutil.Process()
-                    # Utilizza solo core fisici, non logici
-                    physical_cores = [i for i in range(0, mp.cpu_count(), 2)]
-                    if physical_cores:
-                        p.cpu_affinity(physical_cores)
-                        print("✅ Worker su core fisici")
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        # Su macOS, imposta thread priority
+        if platform.system() == "Darwin":
+            try:
+                os.system(f"renice -10 {os.getpid()} 2>/dev/null")
+            except:
+                pass
 
         while running:
             try:
@@ -333,13 +373,17 @@ def main(shared_state):
 
                     # Metti risultato in coda se valido
                     if result is not None and not result_queue.full():
-                        # Svuota coda per evitare ritardi
+                        # Su macOS, sostituisci invece di svuotare per evitare overhead
                         while not result_queue.empty():
-                            result_queue.get()
+                            try:
+                                result_queue.get_nowait()
+                            except:
+                                break
                         result_queue.put(result)
 
                 else:
-                    time.sleep(0.001)
+                    # Su macOS dormi meno per essere più reattivi
+                    time.sleep(0.0005)
 
             except Exception as e:
                 print(f"❌ Errore worker: {e}")
@@ -361,7 +405,11 @@ def main(shared_state):
                             # Libera memoria prima di caricare nuovo modello
                             if device.type == 'cuda':
                                 torch.cuda.empty_cache()
-                            gc.collect()
+                            elif device.type == 'mps':
+                                # Forza garbage collection su macOS
+                                gc.collect()
+                            else:
+                                gc.collect()
 
                             # Carica nuovo modello
                             shared_state.current_model.value = value
@@ -379,13 +427,14 @@ def main(shared_state):
                         print("👋 Chiusura applicazione...")
                         running = False
 
-                time.sleep(0.1)
+                # Dormi meno su macOS per essere più reattivi
+                time.sleep(0.05 if platform.system() == "Darwin" else 0.1)
 
             except Empty:
-                time.sleep(0.1)
+                time.sleep(0.05 if platform.system() == "Darwin" else 0.1)
             except Exception as e:
                 print(f"❌ Errore monitoraggio: {e}")
-                time.sleep(0.1)
+                time.sleep(0.05 if platform.system() == "Darwin" else 0.1)
 
     # Avvia interfaccia GUI
     from gui import start_gui
@@ -414,15 +463,25 @@ def main(shared_state):
     shared_state.running.value = True
     print("🎥 Premi 'q' per uscire")
 
-    # Parametri per rendering ottimizzato - Skip frame adattivo
+    # Parametri per rendering ottimizzato - Skip frame adattivo (più aggressivo su macOS)
     skip_frames = 0
-    dynamic_skip = 0
+    dynamic_skip = 0 if platform.system() != "Darwin" else 2  # Start with higher skip on macOS
 
-    # Crea finestra con flag speciali per priorità
-    cv2.namedWindow("Cartoonizer", cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+    # Crea finestra con flag speciali
+    if platform.system() == "Darwin":
+        cv2.namedWindow("Cartoonizer", cv2.WINDOW_AUTOSIZE)  # AUTOSIZE è più veloce su macOS
+    else:
+        cv2.namedWindow("Cartoonizer", cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+
+    # Target FPS per adattamento dinamico
+    target_fps = 20 if platform.system() == "Darwin" else 30
+
+    # Performance counters
+    perf_history = []
 
     # Loop principale
     while running:
+        start_time = time.time()
         ret, frame = cap.read()
         if not ret:
             if running:
@@ -433,7 +492,7 @@ def main(shared_state):
 
         frame_count += 1
 
-        # Gestione skip frame per mantenere fluidità
+        # Gestione skip frame per mantenere fluidità (più aggressiva su macOS)
         if skip_frames > 0:
             skip_frames -= 1
             continue
@@ -443,12 +502,17 @@ def main(shared_state):
             dynamic_skip -= 1
             continue
 
+        # Su macOS, ridimensiona subito il frame se è troppo grande
+        if platform.system() == "Darwin" and (frame.shape[0] > 480 or frame.shape[1] > 640):
+            frame = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_NEAREST)
+
         # Metti frame in coda se non piena
         if not frame_queue.full():
             frame_queue.put(frame)
         else:
             # Salta frame se coda elaborazione è piena
-            dynamic_skip = 2
+            # Su macOS usiamo uno skip più aggressivo
+            dynamic_skip = 3 if platform.system() == "Darwin" else 2
 
         # Mostra risultato se disponibile
         if not result_queue.empty():
@@ -462,19 +526,41 @@ def main(shared_state):
             frame_count = 0
             last_update = current_time
 
+            # Tieni traccia della storia performance
+            perf_history.append(fps)
+            if len(perf_history) > 5:
+                perf_history.pop(0)
+
             # Invia FPS alla GUI
             shared_state.status_queue.put(("fps_update", fps))
             print(f"📊 FPS: {fps:.1f}")
 
-            # Adatta skip frame dinamico in base a FPS (senza toccare risoluzione)
-            if fps < 30:
-                dynamic_skip = 3  # Skip più aggressivo se fps bassi
-            elif fps < 45:
-                dynamic_skip = 2
-            elif fps < 60:
-                dynamic_skip = 1
+            # Adatta skip frame dinamico in base a FPS
+            # Su macOS usiamo soglie diverse
+            if platform.system() == "Darwin":
+                # Ottimizzazione più aggressiva per macOS
+                if fps < 15:
+                    dynamic_skip = 4
+                    # Riduci anche la risoluzione se persistente
+                    if len(perf_history) > 2 and all(f < 15 for f in perf_history[-2:]):
+                        new_res = max(512, shared_state.processing_resolution.value - 128)
+                        shared_state.command_queue.put(("change_resolution", new_res))
+                elif fps < 20:
+                    dynamic_skip = 3
+                elif fps < 25:
+                    dynamic_skip = 2
+                else:
+                    dynamic_skip = 1  # Mantieni almeno skip=1 per sicurezza su macOS
             else:
-                dynamic_skip = 0  # Non saltare frame se FPS alti
+                # Ottimizzazioni standard
+                if fps < 30:
+                    dynamic_skip = 3
+                elif fps < 45:
+                    dynamic_skip = 2
+                elif fps < 60:
+                    dynamic_skip = 1
+                else:
+                    dynamic_skip = 0
 
         # Input utente
         key = cv2.waitKey(1) & 0xFF
@@ -487,12 +573,25 @@ def main(shared_state):
             new_res = min(1024, shared_state.processing_resolution.value + 64)
             shared_state.command_queue.put(("change_resolution", new_res))
 
+        # Se su macOS, limita il frame rate per evitare sovraccarico
+        if platform.system() == "Darwin":
+            elapsed = time.time() - start_time
+            if elapsed < 1.0 / 30:  # Limita a 30 Hz
+                time.sleep(max(0, 1.0 / 30 - elapsed))
+
     # Pulizia risorse
     running = False
     shared_state.running.value = False
 
     # Attendi chiusura thread
     time.sleep(0.2)
+
+    # Su macOS, termina il processo caffeinate se attivo
+    if platform.system() == "Darwin":
+        try:
+            os.system("pkill caffeinate 2>/dev/null")
+        except:
+            pass
 
     # Rilascia webcam e finestra
     cap.release()
@@ -503,6 +602,9 @@ def main(shared_state):
     transform_cache.clear()
     if device.type == 'cuda':
         torch.cuda.empty_cache()
+    elif device.type == 'mps':
+        # Garbage collection aggressivo su MPS
+        gc.collect()
     gc.collect()
 
     print("👋 Applicazione terminata")
