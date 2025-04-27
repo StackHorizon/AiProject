@@ -1,49 +1,85 @@
 # gui.py
-import tkinter as tk
-import customtkinter as ctk
 import threading
 import time
-import os
-import sys
-from PIL import Image
+
+import customtkinter as ctk
 
 
 def setup_font():
-    # Verifica se il font Lexend è già installato
-    try:
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "tkextrafont"])
-        from tkextrafont import Font
+    # Importazioni necessarie all'inizio della funzione
+    import platform
+    import os
+    import sys
 
-        # Crea directory fonts se non esiste
-        os.makedirs("fonts", exist_ok=True)
+    system = platform.system()
 
-        # Installa Lexend se non presente
-        if not os.path.exists("fonts/Lexend-Regular.ttf"):
-            import requests
-            import zipfile
-            from io import BytesIO
+    if system == "Darwin":  # macOS
+        try:
+            # Approccio specifico per macOS che non richiede tkextrafont
+            os.makedirs("fonts", exist_ok=True)
 
-            print("Scaricamento font Lexend...")
-            url = "https://github.com/googlefonts/lexend/archive/refs/heads/main.zip"
-            response = requests.get(url)
+            # Controlla se il font è già scaricato
+            if not os.path.exists("fonts/Lexend-Regular.ttf"):
+                print("Scaricamento font Lexend per macOS...")
+                import requests
+                import zipfile
+                from io import BytesIO
 
-            with zipfile.ZipFile(BytesIO(response.content)) as zip_file:
-                for file in zip_file.namelist():
-                    if file.endswith('.ttf') and "/fonts/ttf/" in file and "Lexend-" in file:
-                        font_data = zip_file.read(file)
-                        font_name = os.path.basename(file)
-                        with open(f"fonts/{font_name}", "wb") as f:
-                            f.write(font_data)
-            print("✅ Font Lexend scaricato")
+                url = "https://github.com/googlefonts/lexend/archive/refs/heads/main.zip"
+                response = requests.get(url)
 
-        # Registra i font
-        for font_file in os.listdir("fonts"):
-            if font_file.endswith(".ttf") and "Lexend-" in font_file:
-                Font(file=f"fonts/{font_file}", family="Lexend")
+                with zipfile.ZipFile(BytesIO(response.content)) as zip_file:
+                    for file in zip_file.namelist():
+                        if file.endswith('.ttf') and "/fonts/ttf/" in file and "Lexend-" in file:
+                            font_data = zip_file.read(file)
+                            font_name = os.path.basename(file)
+                            with open(f"fonts/{font_name}", "wb") as f:
+                                f.write(font_data)
+                print("✅ Font Lexend scaricato")
 
-    except Exception as e:
-        print(f"Nota: Font Lexend non disponibile, uso font predefinito: {e}")
+            # Su macOS, i font vengono caricati diversamente senza tkextrafont
+            print("✅ Font configurati per macOS")
+            return
+
+        except Exception as e:
+            print(f"Nota: Font Lexend non disponibile su macOS, uso font predefinito: {e}")
+            return
+    else:
+        # Codice originale per Windows e Linux
+        try:
+            import subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "tkextrafont"])
+            from tkextrafont import Font
+
+            # Crea directory fonts se non esiste
+            os.makedirs("fonts", exist_ok=True)
+
+            # Installa Lexend se non presente
+            if not os.path.exists("fonts/Lexend-Regular.ttf"):
+                import requests
+                import zipfile
+                from io import BytesIO
+
+                print("Scaricamento font Lexend...")
+                url = "https://github.com/googlefonts/lexend/archive/refs/heads/main.zip"
+                response = requests.get(url)
+
+                with zipfile.ZipFile(BytesIO(response.content)) as zip_file:
+                    for file in zip_file.namelist():
+                        if file.endswith('.ttf') and "/fonts/ttf/" in file and "Lexend-" in file:
+                            font_data = zip_file.read(file)
+                            font_name = os.path.basename(file)
+                            with open(f"fonts/{font_name}", "wb") as f:
+                                f.write(font_data)
+                print("✅ Font Lexend scaricato")
+
+            # Registra i font
+            for font_file in os.listdir("fonts"):
+                if font_file.endswith(".ttf") and "Lexend-" in font_file:
+                    Font(file=f"fonts/{font_file}", family="Lexend")
+
+        except Exception as e:
+            print(f"Nota: Font Lexend non disponibile, uso font predefinito: {e}")
 
 
 def start_gui(model_list, command_queue, status_queue, initial_model, initial_resolution):
@@ -90,11 +126,20 @@ class AnimeGANControlPanel:
         self.root.geometry("480x620")
         self.root.resizable(False, False)
 
-        # Definiamo i font
-        self.title_font = ctk.CTkFont(family="Lexend", size=24, weight="bold")
-        self.header_font = ctk.CTkFont(family="Lexend", size=18, weight="bold")
-        self.text_font = ctk.CTkFont(family="Lexend", size=14)
-        self.small_font = ctk.CTkFont(family="Lexend", size=12)
+        # Definiamo i font in base al sistema operativo
+        import platform
+        if platform.system() == "Darwin":  # macOS
+            # Font di sistema per macOS
+            self.title_font = ctk.CTkFont(family="Arial", size=24, weight="bold")
+            self.header_font = ctk.CTkFont(family="Arial", size=18, weight="bold")
+            self.text_font = ctk.CTkFont(family="Arial", size=14)
+            self.small_font = ctk.CTkFont(family="Arial", size=12)
+        else:
+            # Font personalizzati per altri sistemi
+            self.title_font = ctk.CTkFont(family="Lexend", size=24, weight="bold")
+            self.header_font = ctk.CTkFont(family="Lexend", size=18, weight="bold")
+            self.text_font = ctk.CTkFont(family="Lexend", size=14)
+            self.small_font = ctk.CTkFont(family="Lexend", size=12)
 
         self.setup_ui()
 
@@ -108,8 +153,7 @@ class AnimeGANControlPanel:
         title_frame.pack(fill="x", padx=20, pady=(20, 0))
 
         title = ctk.CTkLabel(title_frame, text="Capitan Acciaio Cartoonizer",
-                             font=self.title_font,
-                             text_color=("#5D69BE", "#8A6FDF"))
+                             font=self.title_font)
         title.pack(pady=18)
 
         subtitle = ctk.CTkLabel(title_frame, text="Powered by Code22",
@@ -138,15 +182,12 @@ class AnimeGANControlPanel:
         # Menu a tendina per i modelli
         self.model_var = ctk.StringVar(value=self.current_model)
         self.model_dropdown = ctk.CTkComboBox(
-            model_frame,
-            values=self.model_list,
-            variable=self.model_var,
-            state="readonly",
-            width=350,
-            font=self.text_font,
-            dropdown_font=self.text_font,
+            model_frame, values=self.model_list,
             command=self.change_model,
-            corner_radius=12
+            variable=self.model_var,
+            font=self.text_font, button_hover_color="#0066ff",
+            dropdown_font=self.text_font,
+            height=36
         )
         self.model_dropdown.pack(padx=15, pady=(5, 20), fill="x")
 
@@ -172,20 +213,14 @@ class AnimeGANControlPanel:
 
         self.res_value_label = ctk.CTkLabel(res_value_container,
                                             text=f"{self.processing_resolution} px",
-                                            font=self.text_font)
+                                            font=self.header_font)
         self.res_value_label.pack(fill="both", expand=True)
 
         # Slider per la risoluzione
         self.res_slider = ctk.CTkSlider(
-            res_frame,
-            from_=512,
-            to=1024,
-            number_of_steps=16,
-            height=16,
+            res_frame, from_=512, to=1024,
             command=self.update_resolution,
-            progress_color=("#5D69BE", "#8A6FDF"),
-            button_color=("#5D69BE", "#8A6FDF"),
-            button_hover_color=("#4A57A9", "#7A62C9")
+            number_of_steps=8
         )
         self.res_slider.set(self.processing_resolution)
         self.res_slider.pack(padx=20, pady=(15, 15), fill="x")
@@ -205,18 +240,13 @@ class AnimeGANControlPanel:
         btn_frame.pack(fill="x", padx=15, pady=(10, 20))
 
         decrease_btn = ctk.CTkButton(btn_frame, text="- Riduci", width=160,
-                                     font=self.text_font,
-                                     corner_radius=12,
-                                     fg_color=("#D8DEF3", "#3A3D45"),
-                                     text_color=("#5D69BE", "#FFFFFF"),
-                                     hover_color=("#C6CDE6", "#4A4D55"),
-                                     command=self.decrease_resolution)
+                                     command=self.decrease_resolution,
+                                     font=self.text_font)
         decrease_btn.pack(side="left", padx=5)
 
         increase_btn = ctk.CTkButton(btn_frame, text="+ Aumenta", width=160,
-                                     font=self.text_font,
-                                     corner_radius=12,
-                                     command=self.increase_resolution)
+                                     command=self.increase_resolution,
+                                     font=self.text_font)
         increase_btn.pack(side="right", padx=5)
 
         # Aggiunta FPS sotto lo slider della risoluzione
@@ -278,23 +308,20 @@ class AnimeGANControlPanel:
     def monitor_status_queue(self):
         while True:
             try:
-                if not self.status_queue.empty():
-                    status_type, status_data = self.status_queue.get()
+                status_type, value = self.status_queue.get(timeout=0.5)
 
-                    if status_type == "model_changed":
-                        self.model_status.configure(text="Modello caricato")
-
-                    elif status_type == "fps_update":
-                        self.fps_label.configure(text=f"{status_data:.1f}")
-
-                    elif status_type == "running_status":
-                        if not status_data:
-                            self.model_status.configure(text="In pausa")
-
-            except Exception as e:
-                print(f"Errore monitoraggio stato: {e}")
-
-            time.sleep(0.2)
+                if status_type == "fps_update":
+                    self.fps_label.configure(text=f"{value:.1f}")
+                elif status_type == "model_changed":
+                    self.model_status.configure(text="Attivo")
+                    self.model_var.set(value)
+                elif status_type == "resolution_changed":
+                    self.res_slider.set(value)
+                    self.res_value_label.configure(text=f"{value} px")
+            except:
+                # Nessun aggiornamento disponibile
+                pass
+            time.sleep(0.1)
 
     def run(self):
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
