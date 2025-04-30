@@ -43,6 +43,8 @@ fi
 # Installazione delle dipendenze richieste
 print_status "Installazione di Tcl/Tk (richiesto per tkinter)..."
 brew install tcl-tk
+brew install python-tk
+python -m tkinter
 
 # Disinstallazione di qualsiasi versione precedente di Python 3.12
 print_status "Disinstallazione di eventuali versioni precedenti di Python 3.12..."
